@@ -11,3 +11,5 @@ build/
 !.env.example
 mrai.yml
 !.mrai.example.yml
+
+.coverage

@@ -17,6 +17,20 @@ class GitTools:
         self._timeout = timeout
         self._env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
 
+    def _known_refs(self) -> set[str]:
+        """Known ref names (branches, remotes, tags, HEAD) for validating the compare target."""
+        refs = {"HEAD"}
+        for r in self._run("for-each-ref", "--format=%(refname)").splitlines():
+            r = r.strip()
+            if r:
+                refs |= {
+                    r,
+                    r.removeprefix("refs/heads/"),
+                    r.removeprefix("refs/remotes/"),
+                    r.removeprefix("refs/tags/"),
+                }
+        return refs
+
     def _run(self, *argv: str) -> str:
         try:
             proc = subprocess.run(
@@ -41,3 +55,14 @@ class GitTools:
     def git_status(self) -> str:
         """Short status (porcelain), including untracked files."""
         return self._run("status", "--porcelain")
+
+    def git_compare(self, ref: str = "HEAD", path: str = "") -> str:
+        """Unified diff of the working tree against another branch/ref (e.g. "origin/main"),
+        optionally limited to `path`. Read-only: target is validated against known refs."""
+        ref = ref.strip() or "HEAD"
+        if ref not in self._known_refs():
+            return f"git tool error: unknown ref {ref!r}"
+        argv = ["diff", ref]
+        if path:
+            argv += ["--", path]
+        return self._run(*argv)

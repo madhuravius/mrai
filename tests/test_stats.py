@@ -22,7 +22,7 @@ def test_count_tool_calls_aggregates():
 def test_one_line_collapses_and_truncates():
     assert _one_line("a\n\n  b\t c") == "a b c"
     long = "x" * 300
-    assert len(_one_line(long)) == 120 and _one_line(long).endswith("...")
+    assert len(_one_line(long)) == 200 and _one_line(long).endswith("...")
 
 
 def test_fmt_args_short_json_and_truncation():

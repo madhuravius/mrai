@@ -6,8 +6,10 @@ import os
 from collections import Counter
 from collections.abc import AsyncIterable, Sequence
 from contextlib import suppress
+from decimal import Decimal
 from pathlib import Path
 from time import monotonic
+from typing import Any, cast
 
 import typer
 from pydantic_ai import (
@@ -20,18 +22,19 @@ from pydantic_ai import (
     ThinkingPartDelta,
     UnexpectedModelBehavior,
 )
+from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter, ToolCallPart
-from pydantic_ai.usage import RunUsage
+from pydantic_ai.usage import RunUsage, UsageLimits
 from rich.console import Console, Group
-from rich.live import Live
+from rich.live import Live as _Live
 from rich.markdown import Markdown
 from rich.spinner import Spinner
 from rich.text import Text
 
-from .agent import AnswerCandidates, MemoryDeps, build_agent
+from .agent import Answer, MemoryDeps, build_researcher, build_writers
 from .logbook import Logbook, _atomic_write_text
 from .router import Route, resolve_route, select_final_answer
-from .settings import VERSION, Settings, env_deny_patterns
+from .settings import UPSTREAM_RETRY_MARKERS, VERSION, Settings, env_deny_patterns
 from .webfetch import WebFetchTool
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -58,11 +61,13 @@ class ToolRunView:
     with per-tool elapsed timers. Everything shown inside `Live` lives here —
     nothing is printed to the console while Live is active, so Rich never has
     to fight external writes. The watchdog fires once any tool exceeds
-    `timeout`.
+    `timeout`. `slow_overrides` maps tool names to their own (longer) budget —
+    used for `delegate_task`, which drives a whole nested agent loop.
     """
 
-    def __init__(self, timeout: float) -> None:
+    def __init__(self, timeout: float, slow_overrides: dict[str, float] | None = None) -> None:
         self.timeout = timeout
+        self.slow_overrides = slow_overrides or {}
         self.starts: dict[str, float] = {}
         self.thinking = False
         self.interactive = False
@@ -72,6 +77,9 @@ class ToolRunView:
         self.history: list[Text] = []
         self._thought = ""
         self._shown = 0
+
+    def _budget(self, name: str) -> float:
+        return self.slow_overrides.get(name, self.timeout)
 
     def add_tool_call(self, name: str, args: str) -> None:
         self._flush_thought()
@@ -105,7 +113,7 @@ class ToolRunView:
         parts = []
         for name, start in sorted(self.starts.items(), key=lambda kv: kv[1]):
             secs = now - start
-            flag = " [TIMEOUT]" if secs >= self.timeout else ""
+            flag = " [TIMEOUT]" if secs >= self._budget(name) else ""
             parts.append(f"{name} {secs:.1f}s{flag}")
         if self.thinking:
             parts.append("thinking…")
@@ -121,7 +129,7 @@ class ToolRunView:
 
     def timed_out(self) -> list[str]:
         now = monotonic()
-        return [name for name, start in self.starts.items() if now - start >= self.timeout]
+        return [name for name, start in self.starts.items() if now - start >= self._budget(name)]
 
     def fire(self, name: str) -> None:
         self.fired_names.add(name)
@@ -156,16 +164,18 @@ def _event_kind(view: ToolRunView, event) -> str | None:
     return None
 
 
-async def _event_handler(_ctx: RunContext, stream: AsyncIterable, view: ToolRunView) -> None:
-    """Stream thinking text and tool activity to the terminal, live.
+async def _event_handler(
+    _ctx: RunContext, stream: AsyncIterable, view: ToolRunView, live: bool = True
+) -> None:
+    """Stream thinking text and tool activity to the terminal.
 
     A single loop consumes events via `_event_kind`; only the *rendering*
     differs: a transient Live bottom line (transcript + spinner) on a real
-    terminal, or plain line-by-line printing headless (pipes/CI) — each with
-    its own watchdog. `redirect_stdout=False` keeps human-facing tool prompts
-    (e.g. web_fetch's approval) on the real terminal; while an interactive tool
-    is in flight the refresh loop and watchdog are suspended so the prompt
-    isn't redrawn-over.
+    terminal, or plain line-by-line printing headless (`live=False`, pipes/CI)
+    — each with its own watchdog. `redirect_stdout=False` keeps human-facing
+    tool prompts (e.g. web_fetch's approval) on the real terminal; while an
+    interactive tool is in flight the refresh loop and watchdog are suspended
+    so the prompt isn't redrawn-over.
     """
 
     async def _print_plain() -> None:
@@ -185,7 +195,7 @@ async def _event_handler(_ctx: RunContext, stream: AsyncIterable, view: ToolRunV
                     return
             await asyncio.sleep(0.25)
 
-    if not console.is_terminal or os.getenv("CI"):
+    if not live or not console.is_terminal or os.getenv("CI"):
         watcher = asyncio.create_task(_watch())
         try:
             await _print_plain()
@@ -194,28 +204,28 @@ async def _event_handler(_ctx: RunContext, stream: AsyncIterable, view: ToolRunV
         return
 
     try:
-        with Live(
+        with _Live(
             view.snapshot(),
             console=console,
             screen=False,
             refresh_per_second=8,
             transient=True,
             redirect_stdout=False,
-        ) as live:
+        ) as lc:
 
             def _suspend_for_prompt() -> None:
                 """Flush the thinking, exit the overlay, and print the compiled
                 transcript so a human-facing tool prompt lands on a stable
                 terminal instead of fighting the live layer."""
                 with suppress(Exception):
-                    live.stop()
+                    lc.stop()
                 for line in view.new_lines():
                     console.print(line)
 
             async def _tick() -> None:
                 while True:
                     if not view.interactive:
-                        live.update(view.snapshot(), refresh=True)
+                        lc.update(view.snapshot(), refresh=True)
                         for name in view.timed_out():
                             view.fire(name)
                             return
@@ -227,12 +237,12 @@ async def _event_handler(_ctx: RunContext, stream: AsyncIterable, view: ToolRunV
                     kind = _event_kind(view, event)
                     if kind == "call" and view.interactive:
                         _suspend_for_prompt()
-                    elif kind == "result" and not live.is_started:
-                        live.start()
+                    elif kind == "result" and not lc.is_started:
+                        lc.start()
                     elif kind == "thought":
                         view.add_thought(event.delta.content_delta)
                     if not view.interactive:
-                        live.update(view.snapshot(), refresh=True)
+                        lc.update(view.snapshot(), refresh=True)
             finally:
                 watcher.cancel()
     finally:
@@ -243,7 +253,15 @@ async def _event_handler(_ctx: RunContext, stream: AsyncIterable, view: ToolRunV
 
 
 async def _run_with_watchdog(
-    agent, query: str, history, deps: MemoryDeps, view: ToolRunView, usage: RunUsage
+    agent,
+    query: str,
+    history,
+    deps: MemoryDeps,
+    view: ToolRunView,
+    usage: RunUsage,
+    live: bool = True,
+    watchdog: bool = True,
+    limits: UsageLimits | None = None,
 ):
     """Race `agent.run` against the tool-call watchdog; cancel + raise on timeout.
 
@@ -251,10 +269,15 @@ async def _run_with_watchdog(
     survive into the retry (and the footer) rather than being discarded.
     The event-stream handler is wrapped here so the stream is the only signal
     path (the `handler` callable pydantic-ai invokes takes exactly two args).
+    `live=False` routes through the plain/headless renderer (used by the
+    parallel run, where per-agent Live overlays would fight each other).
+    `watchdog=False` skips the fired-wait race for tool-less writers (the timer
+    can never fire, so there is no race to guard).
+    `limits` caps model requests via pydantic-ai's UsageLimits.
     """
 
     async def handler(ctx: RunContext, stream: AsyncIterable) -> None:
-        await _event_handler(ctx, stream, view)
+        await _event_handler(ctx, stream, view, live=live)
 
     run_task = asyncio.create_task(
         agent.run(
@@ -262,9 +285,12 @@ async def _run_with_watchdog(
             message_history=history,
             deps=deps,
             usage=usage,
+            usage_limits=limits,
             event_stream_handler=handler,
         )
     )
+    if not watchdog:
+        return await run_task
     timeout_task = asyncio.create_task(view.fired.wait())
     done, pending = await asyncio.wait(
         {run_task, timeout_task}, return_when=asyncio.FIRST_COMPLETED
@@ -277,6 +303,145 @@ async def _run_with_watchdog(
         raise ToolCallTimeout(", ".join(sorted(view.fired_names)))
     timeout_task.cancel()
     return run_task.result()
+
+
+# The three "angles" run as parallel agents, each producing ONE candidate
+# answer; Jev picks the winner afterwards. Distinct angles yield distinct,
+# comparable candidates.
+_ANGLES = (
+    "code-provenance: trace where things come from and cite exact files/lines",
+    "architecture: explain the design, its roles, and the tradeoffs involved",
+    "pragmatic: give the shortest directly-actionable answer",
+)
+
+
+def _merge_usage(*usages: RunUsage) -> RunUsage:
+    """Sum RunUsage accumulators across parallel agents.
+
+    `cost` is Decimal, so sum it outside the int/float loop.
+    """
+    merged: dict[str, int | float] = {}  # no Decimal here
+    cost = Decimal(0)
+    for u in usages:
+        if u is None:
+            continue
+        for field, value in u.__dict__.items():
+            if field.startswith("_") or not isinstance(value, (int, float)):
+                continue
+            if isinstance(value, bool):
+                continue
+            merged[field] = merged.get(field, 0) + value
+        if isinstance(u.cost, Decimal):
+            cost += u.cost
+    result = RunUsage(**cast(dict[str, Any], merged))
+    if cost > 0:
+        result.cost = cost
+    return result
+
+
+def _writer_prompt(query: str, angle: str) -> str:
+    """The writer's user message: the question plus its assigned angle."""
+    return f"Question: {query}\n\nAngle: {angle}\nWrite ONE final Answer."
+
+
+async def _run_limited(
+    agent,
+    query: str,
+    history,
+    deps: MemoryDeps,
+    timeout: float,
+    usage: RunUsage,
+    *,
+    live: bool = True,
+    watchdog: bool = True,
+    limits: UsageLimits | None = None,
+    slow_overrides: dict[str, float] | None = None,
+):
+    """Run one agent with a UsageLimits guard; on UsageLimitExceeded retry once
+    with a doubled request_limit (transient 50-request exhaustion shouldn't end
+    a legitimate deep-thinking run), then re-raise."""
+    try:
+        return await _run_with_watchdog(
+            agent,
+            query,
+            history,
+            deps,
+            ToolRunView(timeout, slow_overrides),
+            usage,
+            live=live,
+            watchdog=watchdog,
+            limits=limits,
+        )
+    except UsageLimitExceeded:
+        console.print("[yellow]hit request budget; retrying with double limit[/yellow]")
+        base = limits.request_limit if limits and limits.request_limit else 100
+        doubled = UsageLimits(request_limit=2 * base)
+        return await _run_with_watchdog(
+            agent,
+            query,
+            history,
+            deps,
+            ToolRunView(timeout, slow_overrides),
+            usage,
+            live=live,
+            watchdog=watchdog,
+            limits=doubled,
+        )
+
+
+async def _run_pipeline(
+    researcher,
+    writers: Sequence,
+    query: str,
+    history,
+    deps: MemoryDeps,
+    settings: Settings,
+) -> tuple[AgentRunResult, list[AgentRunResult[Answer] | BaseException], RunUsage]:
+    """Two-phase run.
+
+    Phase 1 — the one visible, tool-owning researcher streams a single thought
+    process and does every git/read/web step exactly once, returning an
+    evidence transcript. Phase 2 — three tool-less writers fan out in parallel,
+    each synthesizing ONE Answer from that transcript under its angle. Nothing
+    is re-collected. Returns (research, writer_results, merged_usage).
+    """
+    timeout = settings.tool_timeout
+    limits = UsageLimits(request_limit=settings.max_requests)
+    slow = {"delegate_task": settings.subagent_timeout}
+    r_usage = RunUsage()
+    research = await _run_limited(
+        researcher,
+        query,
+        history,
+        deps,
+        timeout,
+        r_usage,
+        live=True,
+        limits=limits,
+        slow_overrides=slow,
+    )
+    evidence = research.all_messages()  # the full tool workflow, verbatim
+
+    w_usages = [RunUsage() for _ in writers]
+    results = await asyncio.gather(
+        *[
+            _run_limited(
+                w,
+                _writer_prompt(query, angle),
+                list(evidence),
+                deps,
+                timeout,
+                u,
+                live=False,  # no Live collision while fanning out
+                watchdog=False,  # tool-less writers: no timer race
+                limits=limits,
+                slow_overrides=slow,
+            )
+            for w, angle, u in zip(writers, _ANGLES, w_usages, strict=False)
+        ],
+        return_exceptions=True,
+    )
+    return research, list(results), _merge_usage(r_usage, *w_usages)
 
 
 @app.command()
@@ -347,53 +512,89 @@ def main(
             if known
             else "[dim]memory: nothing to inject (no logbook topics / memory file)[/dim]"
         )
+    deps = MemoryDeps(known_context=known)
+
+    common = {
+        "subagents": route.subagents,
+        "web_fetch_budget": max_web_fetches,
+        "deny": tuple((deny or []) + env_deny_patterns()),
+        "settings": settings,
+        "memory": known or None,
+    }
     try:
-        agent, webfetch = build_agent(
-            Path.cwd(),
-            route.model,
-            route.subagents,
-            web_fetch=not no_web,
-            web_fetch_budget=max_web_fetches,
-            deny=tuple((deny or []) + env_deny_patterns()),
-            settings=settings,
-            memory=known or None,
+        # Phase 1 owns the tools; phase 2 writers are tool-less by construction.
+        researcher, webfetch = build_researcher(
+            Path.cwd(), route.model, web_fetch=not no_web, **common
         )
+        writers = build_writers(Path.cwd(), route.model, _ANGLES, **common)
     except Exception as exc:
         console.print(f"[red]model setup failed:[/red] {exc}")
         raise typer.Exit(1) from None
 
-    deps = MemoryDeps(known_context=known)
-    usage = RunUsage()
-
-    def _run() -> AgentRunResult[AnswerCandidates]:
-        return asyncio.run(
-            _run_with_watchdog(
-                agent, query, history or None, deps, ToolRunView(settings.tool_timeout), usage
-            )
-        )
-
     try:
-        result = _run()
+        research, results, usage = asyncio.run(
+            _run_pipeline(researcher, writers, query, history or None, deps, settings)
+        )
     except ToolCallTimeout as exc:
         console.print(
             f"[yellow]tool call exceeded {settings.tool_timeout:.0f}s ({exc}); retrying run once[/yellow]"
         )
         try:
-            result = _run()
-        except ToolCallTimeout:
-            console.print("[yellow]retry also timed out; giving up[/yellow]")
+            research, results, usage = asyncio.run(
+                _run_pipeline(researcher, writers, query, history or None, deps, settings)
+            )
+        except (ToolCallTimeout, UnexpectedModelBehavior, AgentRunError) as exc2:
+            _log_failure(mrai_dir, query, f"retry failed: {_one_line(str(exc2))}", no_write)
+            console.print("[yellow]retry also failed; giving up[/yellow]")
             raise typer.Exit(1) from None
     except UnexpectedModelBehavior as exc:
+        _log_failure(
+            mrai_dir,
+            query,
+            f"model gave up on a failing tool call: {_one_line(str(exc))}",
+            no_write,
+        )
         console.print(
             f"[yellow]model gave up on a failing tool call:[/yellow] {_one_line(str(exc))}"
         )
         raise typer.Exit(1) from None
     except AgentRunError as exc:
-        console.print(f"[red]run failed:[/red] {_one_line(str(exc))}")
+        if _is_retryable(exc):
+            console.print(
+                f"[yellow]upstream HTTP 504/529/429 ({_one_line(str(exc))}); retrying run once[/yellow]"
+            )
+            try:
+                research, results, usage = asyncio.run(
+                    _run_pipeline(researcher, writers, query, history or None, deps, settings)
+                )
+            except AgentRunError as exc2:
+                _log_failure(
+                    mrai_dir,
+                    query,
+                    f"upstream error, retry failed: {_one_line(str(exc2))}",
+                    no_write,
+                )
+                console.print(f"[red]retry failed:[/red] {_one_line(str(exc2))}")
+                raise typer.Exit(1) from None
+        else:
+            _log_failure(
+                mrai_dir,
+                query,
+                f"run failed: {_one_line(str(exc))}",
+                no_write,
+            )
+            console.print(f"[red]run failed:[/red] {_one_line(str(exc))}")
+            raise typer.Exit(1) from None
+
+    ok = [r for r in results if not isinstance(r, BaseException)]
+    for i, r in enumerate(results, 1):
+        if isinstance(r, BaseException):
+            console.print(f"[yellow]candidate {i} failed:[/yellow] {_one_line(str(r))}")
+    if not ok:
+        console.print("[red]all candidates failed; nothing to select[/red]")
         raise typer.Exit(1) from None
-    if not no_write:
-        _save_history(session_path, result.all_messages(), settings.max_history)
-    candidates = result.output.candidates
+
+    candidates: list[Answer] = [r.output for r in ok]
     idx = pick_cost = None
     scores: list[float] = []
     pick_err = "fewer than two candidates; nothing to choose between"
@@ -417,11 +618,13 @@ def main(
                 f"  [bold]{i + 1} · {c.title}[/bold] {scores[i]:.2f}  [dim]{' '.join(c.markdown.split())[:96]}[/dim]{mark}"
             )
     ans = candidates[idx]
+    if not no_write:
+        _save_history(session_path, research.all_messages(), settings.max_history)
     console.print()
     console.print(Markdown(ans.markdown))
     console.print()
     _print_footer(
-        result,
+        research,
         route,
         webfetch,
         mrai_dir,
@@ -434,9 +637,6 @@ def main(
         usage,
         pick_cost,
     )
-
-
-# --- session persistence (the CLI is the single write site; the agent never writes) ---
 
 
 def _trim_history(messages: Sequence[ModelMessage], max_history: int) -> list[ModelMessage]:
@@ -522,6 +722,36 @@ def _log_topic(
         lb.remember(memory_file, topic, title)
         bits.append(f"[bold green]{'new' if created else 'appended'}[/bold green] {path}")
     console.print(" · ".join(bits))
+
+
+def _log_failure(
+    mrai_dir: Path,
+    query: str,
+    reason: str,
+    no_write: bool,
+) -> None:
+    """Record a terminal failure as a stub log entry (no durable memory note)."""
+    if no_write:
+        return
+    lb = Logbook(mrai_dir)
+    path, _ = lb.append(
+        query,
+        "Run failed",
+        query,
+        f"> This run failed and produced no answer.\n\n**Reason:** {reason}\n",
+    )
+    console.print(f"[dim]logged failure: {path}[/dim]")
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """OpenRouter 504 upstream-idle-timeout / 529 overloaded / 429 rate-limit."""
+    text = str(exc)
+    if any(m in text for m in UPSTREAM_RETRY_MARKERS):
+        return True
+    for wrapped in (getattr(exc, "__cause__", None), getattr(exc, "__context__", None)):
+        if wrapped is not None and any(m in str(wrapped) for m in UPSTREAM_RETRY_MARKERS):
+            return True
+    return False
 
 
 def _print_stats(

@@ -19,6 +19,7 @@ from pydantic_settings import (
     YamlConfigSettingsSource,
 )
 
+UPSTREAM_RETRY_MARKERS = ("status_code: 504", "status_code: 529", "status_code: 429")
 DEFAULT_PRO_MODEL = "deepseek/deepseek-v4-pro"
 DEFAULT_FLASH_MODEL = "deepseek/deepseek-v4.1-flash"
 
@@ -54,6 +55,8 @@ class Settings(BaseSettings):
 
     # CLI tool watchdog: per-tool-call budget; the run is cancelled and retried once
     tool_timeout: float = 30.0  # MRAI_TOOL_TIMEOUT
+    subagent_timeout: float = 120.0  # MRAI_SUBAGENT_TIMEOUT
+    max_requests: int = 100  # MRAI_MAX_REQUESTS
 
     # session history + long-term memory (CLI-injected; the model never writes these)
     session_file: str = "session.json"  # MRAI_SESSION_FILE — conversation roll under .mrai/

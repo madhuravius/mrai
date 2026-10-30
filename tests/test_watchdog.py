@@ -39,6 +39,19 @@ def test_tool_run_view_tracks_starts_and_timeouts():
     assert "read_file" in spinner and "TIMEOUT" in spinner and "web_fetch" in spinner
 
 
+def test_tool_run_view_slow_override_gives_subagent_headroom():
+    view = ToolRunView(timeout=1.0, slow_overrides={"delegate_task": 120.0})
+    view.starts["read_file"] = monotonic() - 5  # past the 1s budget
+    view.starts["delegate_task"] = monotonic() - 10  # 10s: past 1s, before 120s
+    assert "read_file" in view.timed_out()
+    assert "delegate_task" not in view.timed_out()  # judged against 120s
+    # the spinner flag reflects the per-tool budget too
+    view.snapshot()
+    spinner = str(view._spinner.text)
+    assert "delegate_task" in spinner and "read_file" in spinner
+    assert spinner.count("[TIMEOUT]") == 1  # only read_file past its budget
+
+
 def test_tool_run_view_builds_transcript():
     view = ToolRunView(timeout=60.0)
     view.add_thought("let me check the router")

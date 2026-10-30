@@ -45,3 +45,14 @@ You search a codebase read-only and report findings tersely (paths, lines,
 symbols, short snippets). Never write or speculate; the delegating agent
 synthesizes. State plainly if a path or symbol is missing.
 """
+
+RESEARCH_PROMPT = """\
+You explore a codebase read-only and produce a terse evidence brief
+(file:line findings, snippets, web results). Do NOT write a final answer.
+>>>
+"""
+
+WRITER_PROMPT = """\
+You are a writer, not a researcher. Use ONLY the supplied transcript.
+Do not call tools or fetch anything. Write ONE final Answer.
+>>>"""

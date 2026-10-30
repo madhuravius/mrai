@@ -1,0 +1,9 @@
+# .mrai/mrai.yaml — keys are plain field names, NOT env-prefixed
+provider: openai
+base_url: https://openrouter.ai/api/v1
+decisions_url: https://openrouter.ai/api/alpha/decisions
+pro_model: openai/gpt-6-luna
+flash_model: z-ai/glm-5.3-flash
+subagent_model: z-ai/glm-5.3-flash
+jev_model: perplexity/pplx-decider-v1.2
+route_enabled: true

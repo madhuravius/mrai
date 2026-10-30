@@ -199,6 +199,14 @@ def resolve_route(
         return _forced(s.pro_model, "flag", subagents, tier="pro")
     if s.model:
         return _forced(s.model, "env", subagents)
+    if not s.route_enabled:
+        return _forced(
+            s.pro_model,
+            "fallback",
+            None,
+            jev_error="routing disabled (non-OpenRouter endpoint)",
+            tier="pro",
+        )
 
     verdict, jev_error = classify_task(query, s.openrouter_api_key, s)
     if verdict is None:

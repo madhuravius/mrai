@@ -15,7 +15,7 @@ build: ## hatchling wheel/sdist -> dist/
 	$(UV) build
 
 test: ## uv run pytest
-	$(UV) run pytest
+	$(UV) run pytest --cov=mrai --cov-report=term-missing -q
 
 lint: ## ruff check + format --check
 	$(UV) run ruff check .

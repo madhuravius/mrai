@@ -12,8 +12,14 @@ import importlib.metadata
 import os
 
 from pydantic import AliasChoices, Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+    YamlConfigSettingsSource,
+)
 
+UPSTREAM_RETRY_MARKERS = ("status_code: 504", "status_code: 529", "status_code: 429")
 DEFAULT_PRO_MODEL = "deepseek/deepseek-v4-pro"
 DEFAULT_FLASH_MODEL = "deepseek/deepseek-v4.1-flash"
 
@@ -30,7 +36,9 @@ VERSION = _package_version()
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="MRAI_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="MRAI_", env_file=".env", extra="ignore", yaml_file=".mrai/mrai.yml"
+    )
 
     # models
     pro_model: str = DEFAULT_PRO_MODEL
@@ -47,6 +55,8 @@ class Settings(BaseSettings):
 
     # CLI tool watchdog: per-tool-call budget; the run is cancelled and retried once
     tool_timeout: float = 30.0  # MRAI_TOOL_TIMEOUT
+    subagent_timeout: float = 120.0  # MRAI_SUBAGENT_TIMEOUT
+    max_requests: int = 100  # MRAI_MAX_REQUESTS
 
     # session history + long-term memory (CLI-injected; the model never writes these)
     session_file: str = "session.json"  # MRAI_SESSION_FILE — conversation roll under .mrai/
@@ -65,11 +75,34 @@ class Settings(BaseSettings):
     read_timeout: float = 5.0  # fail fast if the server dribbles bytes
     user_agent: str = f"mrai/{VERSION} (read-only dev agent)"
 
+    provider: str = "openrouter"  # MRAI_PROVIDER: "openrouter" | "openai"
+    base_url: str | None = None  # MRAI_BASE_URL: OpenAI-compatible gateway (bifrost, LiteLLM, …)
+    route_enabled: bool = True  # MRAI_ROUTE_ENABLED: False skips Jev routing
+
     # secrets
     openrouter_api_key: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("MRAI_OPENROUTER_API_KEY", "OPENROUTER_API_KEY"),
+        validation_alias=AliasChoices(
+            "MRAI_API_KEY", "MRAI_OPENROUTER_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"
+        ),
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            YamlConfigSettingsSource(settings_cls),
+            file_secret_settings,
+        )
 
 
 # security: code-only tuple; `extra="ignore"` keeps stray MRAI_* env vars from

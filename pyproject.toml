@@ -1,0 +1,82 @@
+[project]
+name = "mrai"
+version = "0.1.0"
+description = "Read-only dev agent that logs terse answers to .mrai/*.md"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Madhusudan Ravi", email = "madhuravius@protonmail.com" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+    "httpx>=0.28.1",
+    "pydantic-ai-harness>=0.54.0",
+    "pydantic-ai-slim[openrouter]>=0.1",
+    "pydantic-settings>=2.15.0",
+    "rich>=13.9",
+    "typer>=0.13",
+]
+license = "MIT"
+license-files = ["LICENSE"]
+
+[project.scripts]
+mrai = "mrai.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/madhuravius/mrai"
+Repository = "https://github.com/madhuravius/mrai"
+Issues = "https://github.com/madhuravius/mrai/issues"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.414",
+    "pytest>=8",
+    "ruff>=0.17.3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["mrai"]
+
+[tool.pyright]
+# Type checking: `uv run pyright`
+pythonVersion = "3.10"
+typeCheckingMode = "standard"
+include = ["mrai", "tests"]
+venvPath = "."
+venv = ".venv"
+# pydantic_ai_harness ships without a py.typed marker; don't gate on it.
+reportMissingTypeStubs = "none"
+reportMissingImports = "error"
+
+[tool.ruff]
+# Lint + format: `uv run ruff check .` and `uv run ruff format .`
+line-length = 100
+target-version = "py310"
+src = ["mrai", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+# E501: long prompt/log string literals are intentional; `ruff format` still
+# wraps code, so dropping the rule keeps those strings intact.
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# typer's idiomatic `typer.Option(...)` call-in-default pattern.
+"mrai/cli.py" = ["B008"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

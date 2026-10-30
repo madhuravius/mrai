@@ -475,7 +475,7 @@ def _fmt_args(args) -> str:
 
 def _one_line(text: str) -> str:
     line = " ".join(text.split())
-    return line if len(line) <= 120 else line[:117] + "..."
+    return line if len(line) <= 200 else line[:197] + "..."
 
 
 def count_tool_calls(result) -> Counter[str]:

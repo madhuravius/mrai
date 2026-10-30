@@ -6,12 +6,15 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import LocalWorkspace
+from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.openrouter import OpenRouterModel
+from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai_harness import FileSystem, SubAgent, SubAgents
 
 from .prompt import EXPLORER_PROMPT, SYSTEM_PROMPT
 from .settings import DEFAULT_DENIED_PATTERNS, Settings
+from .tools import GitTools
 from .webfetch import WebFetchTool
 
 __all__ = ["Answer", "AnswerCandidates", "MemoryDeps", "build_agent"]
@@ -56,7 +59,9 @@ def _read_only(root: Path, extra: tuple[str, ...] = ()) -> list:
     ]
 
 
-def _openrouter(key: str | None, name: str) -> OpenRouterModel:
+def _model(s: Settings, key: str | None, name: str):
+    if s.base_url:  # any OpenAI-compatible gateway (bifrost, …)
+        return OpenAIChatModel(name, provider=OpenAIProvider(api_key=key, base_url=s.base_url))
     return OpenRouterModel(name, provider=OpenRouterProvider(api_key=key))
 
 
@@ -88,7 +93,7 @@ def build_agent(
                 agents=[
                     SubAgent(
                         Agent(
-                            model=_openrouter(key, subagent_model or s.subagent_model),
+                            model=_model(s, key, subagent_model or s.subagent_model),
                             instructions=EXPLORER_PROMPT,
                             capabilities=_read_only(root, deny),
                             retries=3,
@@ -102,10 +107,12 @@ def build_agent(
     tools: list = []
     webfetch: WebFetchTool | None = None
     if web_fetch:
-        webfetch = WebFetchTool(budget=web_fetch_budget, settings=s)
-        tools.append(webfetch.web_fetch)
+         webfetch = WebFetchTool(budget=web_fetch_budget, settings=s)
+         tools.append(webfetch.web_fetch)
+    git_tools = GitTools(root)
+    tools += [git_tools.git_diff, git_tools.git_status]
     agent = Agent(
-        model=_openrouter(key, model_name),
+        model=_model(s, key, model_name),
         output_type=AnswerCandidates,
         instructions=SYSTEM_PROMPT,
         capabilities=caps,

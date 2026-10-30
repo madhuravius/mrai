@@ -9,3 +9,5 @@ build/
 .env
 .env.*
 !.env.example
+mrai.yml
+!.mrai.example.yml

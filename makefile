@@ -1,5 +1,6 @@
 SHELL := /usr/bin/env bash
 UV    ?= uv
+BINARY_NAME ?= mrai
 
 .DEFAULT_GOAL := help
 
@@ -13,6 +14,25 @@ sync: ## uv sync
 
 build: ## hatchling wheel/sdist -> dist/
 	$(UV) build
+
+binary: build  ## standalone .pyz (Python 3.10+ required)
+	$(UV) run pyinstaller \
+		--onefile \
+		--name $(BINARY_NAME) \
+		--noconfirm \
+		--clean \
+		--add-data "mrai:mrai" \
+		--collect-all pydantic_core \
+		--collect-all pydantic_ai \
+		--collect-all pydantic_ai_harness \
+		--collect-all rich \
+		--collect-all typer \
+		--collect-all httpx \
+		--collect-all pydantic_settings \
+		--collect-all pyyaml \
+		--collect-all openai \
+		--collect-all genai_prices \
+		mrai/__main__.py
 
 test: ## uv run pytest
 	$(UV) run pytest --cov=mrai --cov-report=term-missing -q

@@ -1,3 +1,3 @@
-from .cli import app
+from mrai.cli import app
 
 app()

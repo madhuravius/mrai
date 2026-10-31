@@ -14,7 +14,7 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai_harness import FileSystem, SubAgent, SubAgents
 
-from .prompt import EXPLORER_PROMPT, RESEARCH_PROMPT, SYSTEM_PROMPT, WRITER_PROMPT
+from .prompt import EXPLORER_PROMPT, RESEARCH_PROMPT, WRITER_PROMPT
 from .settings import DEFAULT_DENIED_PATTERNS, Settings
 from .tools import GitTools
 from .webfetch import WebFetchTool
@@ -23,7 +23,6 @@ __all__ = [
     "Answer",
     "AnswerCandidates",
     "MemoryDeps",
-    "build_agent",
     "build_researcher",
     "build_writers",
 ]
@@ -146,37 +145,6 @@ def _make(
     return agent, webfetch
 
 
-def build_agent(
-    root: Path,
-    model_name: str,
-    subagents: bool = False,
-    subagent_model: str | None = None,
-    web_fetch: bool = True,
-    web_fetch_budget: int | None = None,
-    deny: tuple[str, ...] = (),
-    settings: Settings | None = None,
-    memory: str | None = None,
-    angle: str | None = None,
-) -> tuple[Agent[MemoryDeps, Answer | AnswerCandidates], WebFetchTool | None]:
-    """Single-agent collector (legacy entry, used by tests): tools + optional web,
-    yielding 2-3 candidate answers (or one when an angle is supplied)."""
-    _ = angle  # single-agent mode (no writer pipeline) keeps the pre-fork behaviour
-    return _make(
-        root,
-        model_name,
-        output_type=AnswerCandidates,
-        instructions=SYSTEM_PROMPT,
-        tools_on=True,
-        web_fetch=web_fetch,
-        subagents=subagents,
-        subagent_model=subagent_model,
-        web_fetch_budget=web_fetch_budget,
-        deny=deny,
-        settings=settings,
-        memory=memory,
-    )
-
-
 def build_researcher(
     root: Path,
     model_name: str,
@@ -214,9 +182,6 @@ def build_writers(
     model_name: str,
     angles: Sequence[str],
     *,
-    subagents: bool = False,
-    subagent_model: str | None = None,
-    web_fetch_budget: int | None = None,
     deny: tuple[str, ...] = (),
     settings: Settings | None = None,
     memory: str | None = None,
@@ -234,8 +199,8 @@ def build_writers(
             tools_on=False,
             web_fetch=False,
             read_only=False,  # no filesystem view at all: synthesize, never read
-            subagents=subagents,
-            subagent_model=subagent_model,
+            subagents=False,
+            subagent_model=None,
             deny=deny,
             settings=settings,
             memory=memory,

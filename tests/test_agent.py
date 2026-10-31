@@ -43,22 +43,6 @@ RESULT = {
 }
 
 
-def test_build_agent_registers_git_tools(cli_hermetic, monkeypatch):
-    tm = TestModel(custom_output_args=RESULT)  # valid AnswerCandidates, so no retry
-    monkeypatch.setattr(agent_mod, "_model", lambda *a, **k: tm)
-
-    agent, webfetch = agent_mod.build_agent(
-        cli_hermetic, "test", web_fetch=False, settings=Settings(openrouter_api_key=None)
-    )
-    assert webfetch is None
-    agent.run_sync("hello", deps=MemoryDeps())
-
-    assert tm.last_model_request_parameters is not None
-    names = {t.name for t in tm.last_model_request_parameters.function_tools}
-    assert {"git_diff", "git_status", "git_compare"} <= names
-    assert "web_fetch" not in names
-
-
 def test_model_gateway_when_base_url_set():
     s = Settings(base_url="http://gw", openrouter_api_key="k")
     assert type(agent_mod._model(s, "k", "some/model")).__name__ == "OpenAIChatModel"

@@ -328,8 +328,6 @@ def _merge_usage(*usages: RunUsage) -> RunUsage:
         for field, value in u.__dict__.items():
             if field.startswith("_") or not isinstance(value, (int, float)):
                 continue
-            if isinstance(value, bool):
-                continue
             merged[field] = merged.get(field, 0) + value
         if isinstance(u.cost, Decimal):
             cost += u.cost
@@ -456,7 +454,7 @@ def main(
         False, "--no-subagents", help="disable the explorer subagent"
     ),
     model: str | None = typer.Option(None, "--model", "-m", help="OpenRouter model id"),
-    mrai_dir: Path = typer.Option(Path(".mrai"), "--dir", help="markdown log directory"),
+    mrai_dir: Path = typer.Option(Path.home() / ".mrai", "--dir", help="markdown log directory"),
     no_write: bool = typer.Option(False, "--no-write", help="print answer only, do not log"),
     no_web: bool = typer.Option(False, "--no-web", help="disable the web_fetch tool"),
     max_web_fetches: int | None = typer.Option(

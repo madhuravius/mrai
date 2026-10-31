@@ -15,7 +15,11 @@ class GitTools:
     def __init__(self, root: Path, timeout: float = 10.0) -> None:
         self._root = root
         self._timeout = timeout
-        self._env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
+        self._env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": os.environ.get("HOME", ""),
+            "GIT_OPTIONAL_LOCKS": "0",
+        }
 
     def _known_refs(self) -> set[str]:
         """Known ref names (branches, remotes, tags, HEAD) for validating the compare target."""

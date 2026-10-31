@@ -1,7 +1,10 @@
+import socket
+from unittest.mock import patch
+
 import httpx
 import pytest
 from mrai.settings import Settings
-from mrai.webfetch import ScoredUrl, WebFetchTool
+from mrai.webfetch import ScoredUrl, WebFetchTool, _resolve_and_check, _validate_url
 
 
 def _client(handler):
@@ -128,7 +131,7 @@ def test_fetch_failure_reported_and_counts():
         approve=lambda u, m: [u[0].url],
         client=_client(lambda req: httpx.Response(404, text="nope")),
     )
-    out = tool.web_fetch(["https://example.com/missing"], "r")
+    out = tool.web_fetch(["https://public.example/missing"], "r")
     assert "404" in out and tool.fetched == 1
 
 
@@ -138,7 +141,7 @@ def test_http_error_reported_with_reassess():
         approve=lambda u, m: [u[0].url],
         client=_client(lambda req: httpx.Response(503, text="down")),
     )
-    out = tool.web_fetch(["https://example.com/down"], "r")
+    out = tool.web_fetch(["https://public.example/down"], "r")
     assert "WEB_FETCH ERROR [503]" in out
     assert "REASSESS" in out and "do NOT repeat" in out
     assert tool.fetched == 1
@@ -313,8 +316,115 @@ def test_post_payload_exactly_as_submitted():
         client=_client(handler),
     )
     out = tool.web_fetch(
-        ["https://api.example.com/search"], "search", method="POST", payload='{"q":"search"}'
+        ["https://api.public.example/search"], "search", method="POST", payload='{"q":"search"}'
     )
     assert captured["method"] == "POST"
     assert captured["body"] == b'{"q":"search"}'
     assert '"ok": true' in out
+
+
+def _dns(*addrs: str):
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (a, 0)) for a in addrs]
+
+
+def test_resolve_and_check_public_ok():
+    with patch("mrai.webfetch.socket.getaddrinfo", return_value=_dns("8.8.8.8")):
+        assert _resolve_and_check("public.example") is None
+
+
+def test_resolve_and_check_private_blocked():
+    with patch("mrai.webfetch.socket.getaddrinfo", return_value=_dns("10.0.0.1")):
+        err = _resolve_and_check("internal.example")
+        assert err is not None and "10.0.0.1" in err
+
+
+def test_resolve_and_check_imds_blocked():
+    with patch("mrai.webfetch.socket.getaddrinfo", return_value=_dns("169.254.169.254")):
+        err = _resolve_and_check("evil.example")
+        assert err is not None and "169.254.169.254" in err
+
+
+def test_resolve_and_check_loopback_blocked():
+    with patch("mrai.webfetch.socket.getaddrinfo", return_value=_dns("127.0.0.1")):
+        err = _resolve_and_check("loopback.example")
+        assert err is not None and "127.0.0.1" in err
+
+
+def test_resolve_and_check_link_local_blocked():
+    with patch("mrai.webfetch.socket.getaddrinfo", return_value=_dns("169.254.1.1")):
+        assert _resolve_and_check("linklocal.example") is not None
+
+
+def test_resolve_and_check_mixed_public_private_blocked():
+    with patch(
+        "mrai.webfetch.socket.getaddrinfo",
+        return_value=_dns("8.8.8.8", "10.0.0.1", "1.1.1.1"),
+    ):
+        err = _resolve_and_check("mixed.example")
+        assert err is not None and "10.0.0.1" in err
+
+
+def test_resolve_and_check_dns_failure_fail_open():
+    with patch(
+        "mrai.webfetch.socket.getaddrinfo",
+        side_effect=socket.gaierror("no such host"),
+    ):
+        assert _resolve_and_check("nx.example") is None
+
+
+def test_resolve_and_check_ipv6_loopback_blocked():
+    with patch(
+        "mrai.webfetch.socket.getaddrinfo",
+        return_value=[(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", 0, 0, 0))],
+    ):
+        err = _resolve_and_check("ipv6loopback.example")
+        assert err is not None and "::1" in err
+
+
+def test_validate_url_hostname_to_private_blocked():
+    with patch("mrai.webfetch.socket.getaddrinfo", return_value=_dns("192.168.1.1")):
+        err = _validate_url("https://home.example/admin")
+        assert err is not None and "192.168.1.1" in err
+
+
+def test_validate_url_hostname_to_public_ok():
+    with patch("mrai.webfetch.socket.getaddrinfo", return_value=_dns("93.184.216.34")):
+        assert _validate_url("https://public.example") is None
+
+
+def test_redirect_to_dns_rebind_target_blocked():
+    """Public URL 302 -> hostname that resolves to IMDS: guard blocks it."""
+    tool = WebFetchTool(
+        screen=lambda u, r: _scored((u[0], 0.9)),
+        approve=lambda u, m: [u[0].url],
+        client=_client(_html),
+    )
+
+    def handler(req):
+        if req.url.path == "/page":
+            return httpx.Response(302, headers={"location": "http://rebind.example/steal"})
+        return _html()
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        timeout=1.0,
+        follow_redirects=True,
+        event_hooks={"request": [tool._guard_redirect]},
+    )
+
+    def mock_dns(host, port, family, type):
+        if host == "safe.example":
+            return _dns("93.184.216.34")  # public
+        if host == "rebind.example":
+            return _dns("169.254.169.254")  # IMDS
+        raise socket.gaierror(f"no such host: {host}")
+
+    with patch("mrai.webfetch.socket.getaddrinfo", side_effect=mock_dns):
+        tool2 = WebFetchTool(
+            screen=lambda u, r: _scored((u[0], 0.9)),
+            approve=lambda u, m: [u[0].url],
+            client=client,
+        )
+        out = tool2.web_fetch(["https://safe.example/page"], "r")
+        assert "NETWORK ERROR" in out
+        assert tool2.fetched == 1

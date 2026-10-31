@@ -480,7 +480,7 @@ pre:hover .copy-btn, .copy-btn:focus {{ opacity: 1; }}
 </script></body></html>"""
     path = Path(".mrai/renders") / f"{slugify(topic)}.html"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(html)
+    _atomic_write_text(path=path, text=html)
     return path
 
 

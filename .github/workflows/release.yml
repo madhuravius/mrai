@@ -25,8 +25,7 @@ jobs:
       - run: make binary BINARY_NAME=mrai-${{ matrix.suffix }}
       - name: Smoke test help output
         run: ./dist/mrai-${{ matrix.suffix }} --help | grep -q 'Usage:'
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           files: dist/mrai-${{ matrix.suffix }}
-          generate_release_notes: true

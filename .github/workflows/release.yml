@@ -1,0 +1,30 @@
+name: Release
+
+on:
+  push:
+
+permissions:
+  contents: write
+
+jobs:
+  build-binary:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            suffix: linux-x86_64
+          - os: macos-13
+            suffix: darwin-x86_64
+          - os: macos-latest
+            suffix: darwin-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { python-version: "3.14", enable-cache: true }
+      - run: make binary BINARY_NAME=mrai-${{ matrix.suffix }}
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: binary-${{ matrix.suffix }}
+          path: dist/mrai-${{ matrix.suffix }}

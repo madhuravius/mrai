@@ -12,6 +12,7 @@ from time import monotonic
 from typing import Any, cast
 
 import typer
+from markdown_it import MarkdownIt
 from pydantic_ai import (
     AgentRunError,
     AgentRunResult,
@@ -32,7 +33,7 @@ from rich.spinner import Spinner
 from rich.text import Text
 
 from .agent import Answer, MemoryDeps, build_researcher, build_writers
-from .logbook import Logbook, _atomic_write_text
+from .logbook import Logbook, _atomic_write_text, slugify
 from .router import Route, resolve_route, select_final_answer
 from .settings import UPSTREAM_RETRY_MARKERS, VERSION, Settings, env_deny_patterns
 from .webfetch import WebFetchTool
@@ -442,6 +443,47 @@ async def _run_pipeline(
     return research, list(results), _merge_usage(r_usage, *w_usages)
 
 
+def _write_render(topic: str, markdown: str) -> Path:
+    md = MarkdownIt("gfm-like", {"linkify": True})
+    body = md.render(markdown)
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github.min.css">
+<style>
+body {{ font-family: system-ui; max-width: 72ch; margin: 2rem auto; line-height: 1.6; }}
+pre {{ position: relative; }}
+pre code.hljs {{ padding: 1rem; border-radius: 6px; overflow-x: auto; }}
+.copy-btn {{
+  position: absolute; top: 0.5rem; right: 0.5rem; padding: 0.25rem 0.5rem;
+  font-size: 0.75rem; background: #e1e4e8; border: 1px solid #d1d5da;
+  border-radius: 4px; cursor: pointer; opacity: 0; transition: opacity 0.15s;
+}}
+pre:hover .copy-btn, .copy-btn:focus {{ opacity: 1; }}
+</style></head><body>{body}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+<script>
+(function(){{
+  document.querySelectorAll('pre').forEach(function(pre){{
+    var btn = document.createElement('button');
+    btn.className = 'copy-btn'; btn.textContent = 'Copy';
+    btn.onclick = function(){{
+      var code = pre.querySelector('code');
+      navigator.clipboard.writeText((code||pre).textContent).then(function(){{
+        btn.textContent = 'Copied!';
+        setTimeout(function(){{ btn.textContent = 'Copy'; }}, 2000);
+      }});
+    }};
+    pre.appendChild(btn);
+  }});
+}})();
+</script></body></html>"""
+    path = Path(".mrai/renders") / f"{slugify(topic)}.html"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(html)
+    return path
+
+
 @app.command()
 def main(
     ctx: typer.Context,
@@ -513,8 +555,6 @@ def main(
     deps = MemoryDeps(known_context=known)
 
     common = {
-        "subagents": route.subagents,
-        "web_fetch_budget": max_web_fetches,
         "deny": tuple((deny or []) + env_deny_patterns()),
         "settings": settings,
         "memory": known or None,
@@ -522,7 +562,14 @@ def main(
     try:
         # Phase 1 owns the tools; phase 2 writers are tool-less by construction.
         researcher, webfetch = build_researcher(
-            Path.cwd(), route.model, web_fetch=not no_web, **common
+            Path.cwd(),
+            route.model,
+            web_fetch=not no_web,
+            **{
+                **common,
+                "subagents": route.subagents,
+                "web_fetch_budget": max_web_fetches,
+            },
         )
         writers = build_writers(Path.cwd(), route.model, _ANGLES, **common)
     except Exception as exc:
@@ -719,6 +766,8 @@ def _log_topic(
         path, created = lb.append(topic, title, query, markdown)
         lb.remember(memory_file, topic, title)
         bits.append(f"[bold green]{'new' if created else 'appended'}[/bold green] {path}")
+        html_path = _write_render(topic, markdown)
+        console.print(f"[dim]render:[/dim] file://{html_path.resolve()}")
     console.print(" · ".join(bits))
 
 

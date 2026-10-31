@@ -24,7 +24,8 @@ Web
   codebase only. Never retry a URL the tool reported as failed.
 
 Logs (.mrai/*.md)
-- Inspect `.mrai/` for past answers. If the query relates to an existing log,
+- Inspect `.mrai/` for past answers (skip `.mrai/renders/` — visual HTML copies,
+  not source content). If the query relates to an existing log,
   return that file's `topic` (stem, no .md) so the answer appends there; else
   propose a short kebab-case `topic` (max 5 words) and a short `title`.
 

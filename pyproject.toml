@@ -19,6 +19,7 @@ classifiers = [
 ]
 dependencies = [
     "httpx>=0.28.1",
+    "linkify-it-py>=2.2.0",
     "pydantic-ai-harness>=0.54.0",
     "pydantic-ai-slim[openrouter]>=0.1",
     "pydantic-settings>=2.15.0",

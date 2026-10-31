@@ -227,3 +227,13 @@ def test_pipeline_failure_exits_and_logs_stub(cli_hermetic, monkeypatch):
     assert result.exit_code == 1
     assert "retrying run once" in result.output
     assert "tool call exceeded" in result.output
+
+
+def test_write_render_writes_html(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    path = cli._write_render("hello world", "# Hi\n\nSee `x`.")
+
+    render = tmp_path / ".mrai" / "renders" / "hello-world.html"
+    assert path.exists()
+    assert render.is_file()
+    assert "<h1>Hi</h1>" in render.read_text()

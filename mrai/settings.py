@@ -132,6 +132,7 @@ DEFAULT_DENIED_PATTERNS: tuple[str, ...] = (
     "**/.git",
     "**/.pydantic-ai-harness",
     "**/.opencode",
+    "**/.mrai/renders",
     ".DS_Store",
 )
 

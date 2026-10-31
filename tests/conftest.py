@@ -27,6 +27,7 @@ def cli_hermetic(tmp_path, monkeypatch):
     from mrai import router
 
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MRAI_DIR", str(tmp_path / ".mrai"))
     monkeypatch.setattr(router.httpx, "post", _no_network)
     return tmp_path
 

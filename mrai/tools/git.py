@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
-import subprocess
 from pathlib import Path
+
+from .spawn import safe_run
 
 
 class GitTools:
@@ -15,7 +16,11 @@ class GitTools:
     def __init__(self, root: Path, timeout: float = 10.0) -> None:
         self._root = root
         self._timeout = timeout
-        self._env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
+        self._env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": os.environ.get("HOME", ""),
+            "GIT_OPTIONAL_LOCKS": "0",
+        }
 
     def _known_refs(self) -> set[str]:
         """Known ref names (branches, remotes, tags, HEAD) for validating the compare target."""
@@ -33,11 +38,9 @@ class GitTools:
 
     def _run(self, *argv: str) -> str:
         try:
-            proc = subprocess.run(
+            proc = safe_run(
                 ["git", *argv],
                 cwd=self._root,
-                capture_output=True,
-                text=True,
                 timeout=self._timeout,
                 env=self._env,
             )

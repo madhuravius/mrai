@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import ipaddress
 import re
+import socket
 import threading
 import urllib.parse
 from collections.abc import Callable, Sequence
@@ -66,6 +67,28 @@ def _net_error_msg(url: str, exc: BaseException) -> str:
     )
 
 
+def _resolve_and_check(host: str) -> str | None:
+    """Resolve *host* and return an error if any resolved IP is non-public.
+
+    Returns None when all addresses are public, or when resolution fails
+    (fail-open: DNS blips must not block legitimate URLs, and
+    `_guard_redirect` re-checks right before connect anyway).
+    """
+    try:
+        infos = socket.getaddrinfo(host, None, 0, socket.SOCK_STREAM)
+    except socket.gaierror:
+        return None
+    for _, _, _, _, sockaddr in infos:
+        addr = sockaddr[0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            continue
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            return f"refusing non-public address {host!r} (resolves to {addr})"
+    return None
+
+
 def _validate_url(url: str) -> str | None:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https"):
@@ -78,8 +101,8 @@ def _validate_url(url: str) -> str | None:
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
-        ip = None  # DNS rebinding to private ranges not checked here
-    if ip is not None and (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved):
+        return _resolve_and_check(host)  # <-- hostname now checked
+    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
         return f"refusing non-public address {host!r}"
     return None
 

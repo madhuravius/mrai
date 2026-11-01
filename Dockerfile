@@ -9,6 +9,5 @@ COPY --from=build /app/venv /app/venv
 ENV PATH="/app/venv/bin:$PATH"
 WORKDIR /repo
 USER nonroot
-EXPOSE none
 ENTRYPOINT ["mrai"]
 

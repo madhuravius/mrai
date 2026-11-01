@@ -3,8 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shutil
-import sys
 from collections import Counter
 from collections.abc import AsyncIterable, Sequence
 from contextlib import suppress

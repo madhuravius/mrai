@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
-
-from .spawn import safe_run
 
 
 class GitTools:
@@ -38,9 +37,11 @@ class GitTools:
 
     def _run(self, *argv: str) -> str:
         try:
-            proc = safe_run(
+            proc = subprocess.run(
                 ["git", *argv],
                 cwd=self._root,
+                capture_output=True,
+                text=True,
                 timeout=self._timeout,
                 env=self._env,
             )
@@ -51,6 +52,8 @@ class GitTools:
     def git_diff(self, path: str = "", staged: bool = False) -> str:
         """Unified diff of working tree against HEAD (--cached if staged=True)."""
         argv = ["diff"] + (["--cached"] if staged else ["HEAD"])
+        if path and (".." in Path(path).parts or Path(path).is_absolute()):
+            return "git tool error: path must be relative and within the repo"
         if path:
             argv += ["--", path]
         return self._run(*argv)
@@ -66,6 +69,8 @@ class GitTools:
         if ref not in self._known_refs():
             return f"git tool error: unknown ref {ref!r}"
         argv = ["diff", ref]
+        if path and (".." in Path(path).parts or Path(path).is_absolute()):
+            return "git tool error: path must be relative and within the repo"
         if path:
             argv += ["--", path]
         return self._run(*argv)

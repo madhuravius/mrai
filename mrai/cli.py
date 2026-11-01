@@ -486,50 +486,6 @@ pre:hover .copy-btn, .copy-btn:focus {{ opacity: 1; }}
     return path
 
 
-def _enter_sandbox(no_web: bool) -> None:
-    if sys.platform != "linux":
-        console.print("[yellow]--sandbox skipped: Linux-only[/yellow]")
-        return
-    if os.getenv("MRAI_SANDBOXED"):
-        return
-    if shutil.which("bwrap") is None:
-        raise typer.Exit(1)
-    cwd, home = os.getcwd(), os.path.expanduser("~")
-    cmd = [
-        "bwrap",
-        "--ro-bind",
-        "/",
-        "/",
-        "--bind",
-        cwd,
-        cwd,
-        "--tmpfs",
-        "/tmp",
-        "--unshare-pid",
-        "--proc",
-        "/proc",
-        "--dev",
-        "/dev",
-        "--die-with-parent",
-        "--new-session",
-        "--setenv",
-        "MRAI_SANDBOXED",
-        "1",
-    ]
-    mrai_dir = os.getenv("MRAI_DIR") or f"{home}/.mrai"
-    cmd += [
-        "--bind",
-        mrai_dir,
-        mrai_dir,  # real data + writable
-        "--tmpfs",
-        f"{home}/.cache",  # just needs writable
-    ]
-    if no_web:
-        cmd += ["--unshare-net"]
-    argv = [a for a in sys.argv if a != "--sandbox"]  # strip to avoid re-entry
-    os.execvpe("bwrap", cmd + argv, {**os.environ, "MRAI_SANDBOXED": "1"})
-
-
 @app.command()
 def main(
     ctx: typer.Context,
@@ -538,9 +494,6 @@ def main(
     flash: bool = typer.Option(False, "--flash", "-f", help="force the flash-tier model"),
     pro: bool = typer.Option(False, "--pro", "-p", help="force the pro-tier model"),
     subagents: bool = typer.Option(False, "--subagents", "-s", help="enable the explorer subagent"),
-    sandbox: bool = typer.Option(
-        True, "--sandbox", "-b", help="enable sandboxing and run natively"
-    ),
     no_subagents: bool = typer.Option(
         False, "--no-subagents", help="disable the explorer subagent"
     ),
@@ -564,8 +517,6 @@ def main(
     if version:
         typer.echo(f"mrai {VERSION}")
         raise typer.Exit(0)
-    if sandbox:
-        _enter_sandbox(no_web=no_web)
     if query is None:
         typer.echo(ctx.get_help())
         raise typer.Exit(0)

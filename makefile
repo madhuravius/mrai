@@ -1,10 +1,12 @@
 SHELL := /usr/bin/env bash
 UV    ?= uv
-BINARY_NAME ?= mrai
 
 .DEFAULT_GOAL := help
 
-.PHONY: help sync build test lint fmt typecheck check run
+.PHONY: help sync build test lint fmt typecheck check run docker-build docker-run
+
+%:
+	@:
 
 help:
 	@printf 'Usage:\n\n'; grep -hE '^[A-Za-z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "} {printf " make %-15s #%s\n", $$1, $$2}'
@@ -12,27 +14,26 @@ help:
 sync: ## uv sync
 	$(UV) sync
 
-build: ## hatchling wheel/sdist -> dist/
-	$(UV) build
+docker-build:
+	docker build -t mrai .
 
-binary: build  ## standalone .pyz (Python 3.10+ required)
-	$(UV) run pyinstaller \
-		--onefile \
-		--name $(BINARY_NAME) \
-		--noconfirm \
-		--clean \
-		--add-data "mrai:mrai" \
-		--collect-all pydantic_core \
-		--collect-all pydantic_ai \
-		--collect-all pydantic_ai_harness \
-		--collect-all rich \
-		--collect-all typer \
-		--collect-all httpx \
-		--collect-all pydantic_settings \
-		--collect-all pyyaml \
-		--collect-all openai \
-		--collect-all genai_prices \
-		mrai/__main__.py
+docker-run:
+	@mkdir -p ~/.mrai/renders
+	@mkdir -p .mrai/renders
+	docker run --rm -it \
+		--user "$$(id -u):$$(id -g)" \
+		--tmpfs /tmp \
+		--tmpfs /home/nonroot/.cache \
+		--cap-drop ALL \
+		--security-opt=no-new-privileges \
+		-v ~/.mrai:/tmp/mrai-data \
+		-v "$$(pwd):$$(pwd):ro" \
+		-v "$$(pwd)/.mrai:$$(pwd)/.mrai" \
+		-w "$$(pwd)" \
+		-e OPENROUTER_API_KEY \
+		-e MRAI_DIR=/tmp/mrai-data \
+		-e COLUMNS \
+		mrai $(filter-out $@,$(MAKECMDGOALS))
 
 test: ## uv run pytest
 	$(UV) run pytest --cov=mrai --cov-report=term-missing -q

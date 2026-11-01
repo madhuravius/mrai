@@ -172,8 +172,6 @@ def jev_screen_urls(
 
 
 class WebFetchTool:
-    """Jev-screened, human-approved web fetch, safe under the read-only sandbox."""
-
     def __init__(
         self,
         *,
@@ -228,7 +226,6 @@ class WebFetchTool:
         self,
         urls: list[str],
         reason: str,
-        method: str = "GET",
         payload: str | None = None,
     ) -> str:
         """Fetch after Jev ranks the candidates and the developer approves the exact request."""
@@ -248,7 +245,7 @@ class WebFetchTool:
             keepers = [x for x in scored if x.score >= self._threshold][: self._max_recommended]
             if not keepers:
                 return _NOISE
-            chosen = self._pick(keepers, method, payload, reason)
+            chosen = self._pick(keepers, payload, reason)
             if isinstance(chosen, _DenyAll):
                 return self._deny(force=True)
             if not chosen:
@@ -256,7 +253,7 @@ class WebFetchTool:
             self.denials = 0
             remaining = self._budget - self.fetched
             chosen = [x.url for x in keepers if x.url in chosen][:remaining]
-            results = [self._fetch(method, url, payload) for url in chosen]
+            results = [self._fetch(url, payload) for url in chosen]
             if results and all(r.startswith(_FAILURE_PREFIXES) for r in results):
                 self.network_failures += 1
                 if self.network_failures >= self._max:
@@ -266,11 +263,11 @@ class WebFetchTool:
                 self.network_failures = 0
             return "\n\n".join(results) or "WEB_FETCH: nothing fetched."
 
-    def _pick(self, keepers, method, payload, reason) -> list[str] | _DenyAll:
+    def _pick(self, keepers, payload, reason) -> list[str] | _DenyAll:
         if self._approve:
-            meta = {"method": method.upper(), "payload": payload, "reason": reason}
+            meta = {"method": "GET", "payload": payload, "reason": reason}
             return [u for u in self._approve(list(keepers), meta) if u in {x.url for x in keepers}]
-        return self._terminal_prompt(keepers, method, payload, reason)
+        return self._terminal_prompt(keepers, payload, reason)
 
     def _deny(self, force: bool = False) -> str:
         self.denials += 1
@@ -293,7 +290,7 @@ class WebFetchTool:
             top = " [bold][top pick][/bold]" if i == 1 and x.score >= self._threshold else ""
             c.print(f"  {mark} {x.url} [dim](Jev {x.score:.2f})[/dim]{top}")
 
-    def _terminal_prompt(self, keepers, method, payload, reason) -> list[str] | _DenyAll:
+    def _terminal_prompt(self, keepers, payload, reason) -> list[str] | _DenyAll:
         c = Console()
         c.print(
             f"[yellow]web_fetch review[/yellow] (denials {self.denials}/{self._max} · fetched {self.fetched}/{self._budget})"
@@ -301,7 +298,7 @@ class WebFetchTool:
         for i, x in enumerate(keepers, 1):
             top = " · top pick" if i == 1 else ""
             c.print(f"  [bold]{i}.[/bold] {x.url} [dim](Jev {x.score:.2f}{top})[/dim]")
-        c.print(f"  method={method.upper()} payload={payload or '(none)'}\n  reason: {reason}")
+        c.print(f"  method=GET payload={payload or '(none)'}\n  reason: {reason}")
         try:
             a = (
                 input("Approve which URL(s)? (e.g. 1,2 — Enter=none, 'd'=deny all) ")
@@ -324,12 +321,12 @@ class WebFetchTool:
         if err:
             raise httpx.HTTPError(err)
 
-    def _fetch(self, method: str, url: str, payload: str | None) -> str:
+    def _fetch(self, url: str, payload: str | None) -> str:
         self.fetched_urls.append(url)
         self.fetched += 1
         try:
             with self._client.stream(
-                (method or "GET").upper(),
+                "GET",
                 url,
                 headers={"User-Agent": self._user_agent},
                 content=payload or None,

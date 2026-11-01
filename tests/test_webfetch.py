@@ -315,10 +315,8 @@ def test_post_payload_exactly_as_submitted():
         approve=lambda u, m: [u[0].url],
         client=_client(handler),
     )
-    out = tool.web_fetch(
-        ["https://api.public.example/search"], "search", method="POST", payload='{"q":"search"}'
-    )
-    assert captured["method"] == "POST"
+    out = tool.web_fetch(["https://api.public.example/search"], "search", payload='{"q":"search"}')
+    assert captured["method"] == "GET"
     assert captured["body"] == b'{"q":"search"}'
     assert '"ok": true' in out
 

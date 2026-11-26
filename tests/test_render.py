@@ -31,7 +31,7 @@ def test_write_page_lands_in_the_shared_site(tmp_path, monkeypatch):
     ws = _ws(tmp_path)
     path = render.write_page(ws, "hello world", "# Hi\n\nSee `x`.")
     site = _home(tmp_path) / "site"
-    assert path == site / ws.name / "hello-world.html"
+    assert path == site / f"{ws.name}--hello-world.html"
     assert "<h1>Hi</h1>" in path.read_text()
     for name in render.ASSETS:
         assert (site / name).is_file()
@@ -43,7 +43,7 @@ def test_page_is_thin(tmp_path):
     html = render.write_page(_ws(tmp_path), "t", md).read_text()
     assert "<style>" not in html
     assert not re.search(r"<script>(?!\s*</script>)", html), "no inline script"
-    assert '<script src="../index.js" defer></script>' in html
+    assert '<script src="index.js" defer></script>' in html
     assert 'id="tpl-item"' in html and 'id="mrai-nav"' in html
 
 
@@ -58,7 +58,7 @@ def test_render_escapes_html_from_the_answer(tmp_path):
 
 def test_title_is_escaped(tmp_path):
     html = render.write_page(_ws(tmp_path), "</title><script>x", "x").read_text()
-    assert "<title>&lt;/title&gt;&lt;script&gt;x</title>" in html
+    assert "<title>&lt;/title&gt;&lt;script&gt;x · mrai</title>" in html
 
 
 def test_csp_forbids_inline_eval_and_remote_images(tmp_path):
@@ -69,9 +69,17 @@ def test_csp_forbids_inline_eval_and_remote_images(tmp_path):
     assert html.count('integrity="sha512-') == 3
 
 
-def test_assets_are_cache_busted_by_content(tmp_path):
+def test_assets_load_from_the_pages_own_folder(tmp_path):
+    """Safari blocks local pages from reading other folders; query strings on file URLs vary."""
     html = render.write_page(_ws(tmp_path), "t", "x").read_text()
-    assert f"app.js?v={render.asset_version()}" in html
+    assert "../" not in html and "?v=" not in html
+    for name in ("style.css", "app.js", "index.js"):
+        assert f'"{name}"' in html
+    assert 'id="mrai-asset-check"' in html
+
+
+def test_css_avoids_light_dark_for_older_safari():
+    assert "light-dark(" not in render._asset("style.css")
 
 
 def test_host_path_maps_container_state_dir_to_host(tmp_path, monkeypatch):
@@ -173,8 +181,8 @@ def test_reindex_rebuilds_every_workspace_with_latest_answer(tmp_path):
     Logbook(b).append("u", "U", "q", "other workspace")
     pages = render.reindex(a)
     site = _home(tmp_path) / "site"
-    assert sorted(pages) == [site / "a-1" / "t.html", site / "b-2" / "u.html"]
-    body = (site / "a-1" / "t.html").read_text().split("<article>", 1)[1]
+    assert sorted(pages) == [site / "a-1--t.html", site / "b-2--u.html"]
+    body = (site / "a-1--t.html").read_text().split("<article>", 1)[1]
     assert "new answer" in body and "old answer" not in body
     assert {e["ws"] for e in _index(tmp_path)} == {"a-1", "b-2"}
 
@@ -204,3 +212,43 @@ def test_unstructured_topic_file_is_a_single_entry(tmp_path):
     (ws / "notes.md").write_text("# Notes\n\n## a\n\none\n\n## b\n\ntwo\n")
     [entry] = Logbook(ws).search_index()
     assert "one" in entry["text"] and "two" in entry["text"]
+
+
+def test_reindex_removes_pages_from_the_old_layout_and_dead_topics(tmp_path):
+    ws = _ws(tmp_path, "a-1")
+    Logbook(ws).append("t", "T", "q", "x")
+    site = _home(tmp_path) / "site"
+    (site / "a-1").mkdir(parents=True)
+    (site / "a-1" / "t.html").write_text("old layout")
+    (site / "a-1--gone.html").write_text("topic log deleted")
+    render.reindex(ws)
+    assert sorted(p.name for p in site.glob("*.html")) == ["a-1--t.html"]
+    assert not (site / "a-1").exists()
+    assert (site / "app.js").is_file() and (site / "index.js").is_file()
+
+
+def test_page_title_is_the_logs_display_title_not_the_slug(tmp_path):
+    ws = _ws(tmp_path)
+    Logbook(ws).append("how retry works", "How does retry work?", "q", "answer")
+    [page] = render.reindex(ws)
+    assert "<title>How does retry work? · mrai</title>" in page.read_text()
+    html = render.write_page(ws, "plain-topic", "x").read_text()
+    assert "<title>plain-topic · mrai</title>" in html
+
+
+def test_title_skips_a_failed_first_run_and_follows_the_newest_answer(tmp_path):
+    ws = _ws(tmp_path)
+    lb = Logbook(ws)
+    lb.append("t", "Run failed", "q", "> This run failed")
+    lb.append("t", "First real answer", "q2", "## A subheading\n\nbody")
+    lb.append("t", "Run failed", "q3", "> This run failed")
+    [page] = render.reindex(ws)
+    assert "<title>First real answer · mrai</title>" in page.read_text()
+    assert {e["title"] for e in _index(tmp_path)} == {"First real answer"}
+
+
+def test_title_of_a_topic_that_never_succeeded_says_so(tmp_path):
+    ws = _ws(tmp_path)
+    Logbook(ws).append("t", "Run failed", "q", "> This run failed")
+    [page] = render.reindex(ws)
+    assert "<title>Run failed · mrai</title>" in page.read_text()

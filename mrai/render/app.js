@@ -23,7 +23,10 @@
   var savedTheme = store.get('mrai-theme');
   if (savedTheme) applyTheme(savedTheme);
 
-  // nav state must also be set before paint to avoid a layout jump
+  // nav state must also be set before paint to avoid a layout jump. Only the
+  // wide-screen docked/closed choice is remembered; the narrow-screen drawer
+  // always starts shut, so a choice made on a big screen can't cover a small one.
+  var NAV_DOCK_QUERY = '(min-width: 960px)'; // keep in step with style.css
   var savedNav = store.get('mrai-nav');
   if (savedNav) root.dataset.nav = savedNav;
 
@@ -90,10 +93,10 @@
     el.title = new Date(e.ts).toLocaleString() + '\n' + e.file;
   }
 
-  // pages live at site/<ws>/<topic>.html, so every link climbs to the site root first
-  function pageHref(e) {
-    return '../' + encodeURIComponent(e.ws) + '/' + encodeURIComponent(e.topic) + '.html';
-  }
+  // every page sits in the site folder itself (no subfolders: Safari is strict
+  // about local pages loading files from other folders)
+  function pageFile(e) { return e.ws + '--' + e.topic + '.html'; }
+  function pageHref(e) { return encodeURIComponent(pageFile(e)); }
 
   // one list item (search result or nav file) from <template id="tpl-item">
   function makeItem(e, title, terms) {
@@ -147,7 +150,6 @@
       var show = open && terms.length > 0;
       panes.hidden = !show;
       count.hidden = !show;
-      root.classList.toggle('searching', show);
     }
 
     function run() {
@@ -198,22 +200,47 @@
   function setupNav(index) {
     var nav = document.getElementById('mrai-nav');
     var files = document.getElementById('mrai-files');
-    var here = location.pathname.split('/').slice(-2).map(decodeURIComponent).join('/');
+    var here = decodeURIComponent(location.pathname.split('/').pop());
     var seen = {};
     index.forEach(function (e) { // index is newest first, so the first hit per topic is its latest
       var key = e.ws + '/' + e.topic;
       if (seen[key]) return;
       seen[key] = true;
       var li = makeItem(e, e.title, []);
-      if (here === e.ws + '/' + e.topic + '.html') li.classList.add('active');
+      if (here === pageFile(e)) li.classList.add('active');
       li.querySelector('.pick').addEventListener('click', function () { location.href = pageHref(e); });
       files.append(li);
     });
-    document.getElementById('mrai-nav-toggle').addEventListener('click', function () {
-      var next = getComputedStyle(nav).display === 'none' ? 'open' : 'closed';
-      root.dataset.nav = next;
-      store.set('mrai-nav', next);
+
+    var toggle = document.getElementById('mrai-nav-toggle');
+    var docked = window.matchMedia(NAV_DOCK_QUERY);
+    function closeDrawer() { root.classList.remove('nav-drawer'); }
+    function paint() {
+      toggle.setAttribute('aria-expanded', getComputedStyle(nav).display !== 'none');
+    }
+    toggle.addEventListener('click', function () {
+      if (docked.matches) {
+        var next = root.dataset.nav === 'closed' ? 'open' : 'closed';
+        root.dataset.nav = next;
+        store.set('mrai-nav', next);
+      } else {
+        root.classList.toggle('nav-drawer');
+      }
+      paint();
     });
+    document.addEventListener('mousedown', function (ev) {
+      if (root.classList.contains('nav-drawer') && !nav.contains(ev.target) &&
+          !toggle.contains(ev.target)) { closeDrawer(); paint(); }
+    });
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Escape' && root.classList.contains('nav-drawer')) {
+        closeDrawer(); paint(); toggle.focus();
+      }
+    });
+    var onResize = function () { closeDrawer(); paint(); };
+    if (docked.addEventListener) docked.addEventListener('change', onResize);
+    else docked.addListener(onResize); // Safari < 14
+    paint();
   }
 
   // ---- theme button, code blocks --------------------------------------------
@@ -247,6 +274,8 @@
   }
 
   document.addEventListener('DOMContentLoaded', function () {
+    var check = document.getElementById('mrai-asset-check');
+    if (check) check.remove();
     var index = window.MRAI_INDEX || [];
     setupThemeButton();
     setupSearch(index);

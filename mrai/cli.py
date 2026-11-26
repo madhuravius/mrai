@@ -49,7 +49,7 @@ from rich.text import Text
 
 from . import render, retry
 from .agent import Answer, MemoryDeps, build_researcher, build_writers
-from .logbook import STATS_MARKER, Logbook, _atomic_write_text
+from .logbook import FAILED_TITLE, STATS_MARKER, Logbook, _atomic_write_text, topic_title
 from .router import Route, resolve_route, select_final_answer
 from .settings import (
     UPSTREAM_RETRY_MARKERS,
@@ -962,7 +962,8 @@ def _log_topic(
         render.record_workspace(mrai_dir, Path.cwd())
         lb.remember(memory_file, topic, title)
         bits.append(f"[bold green]{'new' if created else 'appended'}[/bold green] {path}")
-        html_path = render.write_page(mrai_dir, topic, markdown)
+        page_title = topic_title(path.read_text(encoding="utf-8"), title)
+        html_path = render.write_page(mrai_dir, topic, markdown, page_title)
         render.write_index(mrai_dir, memory_file.name)
         console.print(
             f"[dim]render:[/dim] file://{render.host_path(html_path.resolve(), mrai_dir)}"
@@ -1004,7 +1005,7 @@ def _log_failure(
     lb = Logbook(mrai_dir)
     path, _ = lb.append(
         query,
-        "Run failed",
+        FAILED_TITLE,
         query,
         f"> This run failed and produced no answer.\n\n**Reason:** {reason}\n",
     )

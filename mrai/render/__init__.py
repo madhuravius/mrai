@@ -1,9 +1,10 @@
 """Static HTML renders of logged answers: one site for every workspace.
 
-Layout under <mrai home>/site/:
+Layout under <mrai home>/site/, deliberately flat (Safari restricts local pages
+from loading files outside their own folder):
   app.js, style.css   copied from this package
   index.js            search index over every workspace's topic logs
-  <ws>/<slug>.html    one thin page per topic; <ws> is the state dir's name
+  <ws>--<slug>.html   one thin page per topic; <ws> is the state dir's name
 
 Each logged answer writes its own page and rewrites index.js; no other page
 changes. Pages work over file:// with no server.
@@ -11,7 +12,6 @@ changes. Pages work over file:// with no server.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from contextlib import suppress
@@ -23,7 +23,7 @@ from jinja2 import Environment, PackageLoader, select_autoescape
 from markdown_it import MarkdownIt
 from markupsafe import Markup
 
-from ..logbook import MARKER_LINE, Logbook, _atomic_write_text, slugify
+from ..logbook import MARKER_LINE, Logbook, _atomic_write_text, slugify, topic_title
 from ..settings import mrai_home, workspace_key
 
 HLJS = {
@@ -46,10 +46,6 @@ def _markdown() -> MarkdownIt:
 @cache
 def _asset(name: str) -> str:
     return files("mrai.render").joinpath(name).read_text(encoding="utf-8")
-
-
-def asset_version() -> str:
-    return hashlib.sha256("".join(_asset(n) for n in ASSETS).encode()).hexdigest()[:12]
 
 
 def csp() -> str:
@@ -104,17 +100,20 @@ def _sync_assets(site: Path) -> None:
 
 
 def page_path(mrai_dir: Path, topic: str) -> Path:
-    return site_dir() / mrai_dir.name / f"{slugify(topic)}.html"
+    return site_dir() / f"{mrai_dir.name}--{slugify(topic)}.html"
 
 
-def write_page(mrai_dir: Path, topic: str, markdown: str) -> Path:
-    """Write the topic's page for one answer, plus the shared assets it loads."""
+def write_page(mrai_dir: Path, topic: str, markdown: str, title: str | None = None) -> Path:
+    """Write the topic's page for one answer, plus the shared assets it loads.
+
+    `title` is the topic's display title (as the nav and search show it); the
+    page's file name always comes from `topic`.
+    """
     html = _env.get_template("page.html.j2").render(
-        title=topic,
+        title=title or topic,
         body=Markup(_markdown().render(MARKER_LINE.sub("", markdown))),
         csp=csp(),
         hljs=HLJS,
-        asset_version=asset_version(),
     )
     path = page_path(mrai_dir, topic)
     _atomic_write_text(path, html)
@@ -163,11 +162,29 @@ def reindex(current: Path | None = None, memory_name: str = "memories.md") -> li
     """Rebuild the whole site from every workspace (e.g. after upgrading mrai)."""
     if current is not None:
         record_workspace(current, Path.cwd())
-    pages = [
-        write_page(ws, path.stem, latest_answer(path.read_text(encoding="utf-8")))
-        for ws in workspace_dirs(current)
-        for path in sorted(ws.glob("*.md"))
-        if path.name != memory_name
-    ]
+    pages = []
+    for ws in workspace_dirs(current):
+        for path in sorted(ws.glob("*.md")):
+            if path.name == memory_name:
+                continue
+            text = path.read_text(encoding="utf-8")
+            pages.append(
+                write_page(ws, path.stem, latest_answer(text), topic_title(text, path.stem))
+            )
     write_index(current, memory_name)
+    _remove_stale_pages(set(pages))
     return pages
+
+
+def _remove_stale_pages(keep: set[Path]) -> None:
+    """The site is entirely generated: drop pages no log produces any more,
+    including the per-workspace subfolders of the older layout."""
+    site = site_dir()
+    for page in site.glob("*.html"):
+        if page not in keep:
+            page.unlink()
+    for sub in (d for d in site.iterdir() if d.is_dir()):
+        for page in sub.glob("*.html"):
+            page.unlink()
+        with suppress(OSError):
+            sub.rmdir()

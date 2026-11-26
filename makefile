@@ -3,7 +3,7 @@ UV    ?= uv
 
 .DEFAULT_GOAL := help
 
-.PHONY: help sync build test lint fmt typecheck check run docker-build docker-run install
+.PHONY: help sync build test test-container lint fmt typecheck check run docker-build docker-run install
 
 %:
 	@:
@@ -23,9 +23,15 @@ install: docker-build ## build the image and install the ./ai wrapper to ~/.loca
 docker-build: ## build a docker image that runs mrai
 	docker build -t ghcr.io/madhuravius/mrai \
 		--label org.opencontainers.image.version="$$(git describe --tags --always 2>/dev/null || echo dev)" .
+	@rm -f "$${MRAI_HOME:-$$HOME/.mrai}/pinned-image"
 
 docker-run: docker-build ## run the locally built image via ./ai (per-repo state under ~/.mrai/workspaces)
 	./ai $(filter-out $@,$(MAKECMDGOALS))
+
+test-container: docker-build ## check the container sandbox under ./ai's real flags
+	@home=$$(mktemp -d); mkdir -p "$$home/workspaces/other-ws"; touch "$$home/mrai.yml"; \
+	MRAI_HOME="$$home" MRAI_NO_UPDATE_CHECK=1 MRAI_PROBE_CANARY=leak MRAI_ENTRYPOINT=/bin/sh \
+		./ai "$$PWD/tests/container/probe.sh"; rc=$$?; rm -rf "$$home"; exit $$rc
 
 test: ## uv run pytest
 	$(UV) run pytest --cov=mrai --cov-report=term-missing -q
@@ -41,10 +47,11 @@ fmt: ## ruff format + check --fix
 typecheck: ## pyright (venvPath .venv already configured)
 	$(UV) run pyright
 
-check: ## lint + typecheck + test
+check: ## lint + typecheck + test + test-container
 	$(MAKE) lint
 	$(MAKE) typecheck
 	$(MAKE) test
+	$(MAKE) test-container
 
 run: ## run agent (e.g. make run ARGS="where is slugify defined?")
 	$(UV) run mrai $(ARGS)

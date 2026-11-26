@@ -80,7 +80,12 @@ compose() {
 
 # Update reminder: daily background tag lookup; MRAI_NO_UPDATE_CHECK=1 disables.
 image="${MRAI_IMAGE:-ghcr.io/madhuravius/mrai}"
+repo="${MRAI_REPO:-https://github.com/madhuravius/mrai}"
 update_cache="$mrai_home/update-check"
+# set by `ai --update`: the verified image digest to run
+pin_file="$mrai_home/pinned-image"
+run_image=$image
+[[ -f "$pin_file" ]] && run_image=$(<"$pin_file")
 
 newest_tag() {
     awk -F'[v.]' '/^v[0-9]+\.[0-9]+\.[0-9]+$/ {
@@ -99,6 +104,11 @@ version_lt() {
     return 1
 }
 
+latest_tag() {
+    GIT_TERMINAL_PROMPT=0 git ls-remote --tags --refs "$repo" 2>/dev/null |
+        sed -n 's|.*refs/tags/||p' | newest_tag
+}
+
 refresh_update_cache() {
     local now last
     now=$(date +%s)
@@ -109,9 +119,7 @@ refresh_update_cache() {
     mkdir -p "$mrai_home"
     printf '%s\n' "$now" >"$update_cache.attempt"
     (
-        latest=$(GIT_TERMINAL_PROMPT=0 git ls-remote --tags --refs \
-            "${MRAI_REPO:-https://github.com/madhuravius/mrai}" 2>/dev/null |
-            sed -n 's|.*refs/tags/||p' | newest_tag)
+        latest=$(latest_tag)
         [[ -n "$latest" ]] || exit 0
         printf '%s %s\n' "$(date +%s)" "$latest" >"$update_cache.$$"
         mv "$update_cache.$$" "$update_cache"
@@ -124,18 +132,61 @@ warn_if_outdated() {
     command -v git &>/dev/null && refresh_update_cache
     local latest installed msg
     latest=$(cut -d' ' -f2 "$update_cache" 2>/dev/null) || return 0
-    installed=$(docker image inspect "$image" \
+    installed=$(docker image inspect "$run_image" \
         --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' 2>/dev/null)
     installed="${installed%%-*}"
     [[ "$installed" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && -n "$latest" ]] || return 0
     version_lt "$installed" "$latest" || return 0
-    msg="⚠ mrai $latest is available (you have $installed). Update: git pull && make install"
+    msg="⚠ mrai $latest is available (you have $installed). Update: "
+    if [[ -f "$pin_file" ]]; then msg+="ai --update"; else msg+="git pull && make install"; fi
     if command -v gum &>/dev/null; then
         gum style --foreground 214 "$msg" >&2
     else
         printf '\e[33m%s\e[0m\n' "$msg" >&2
     fi
 }
+
+die() { printf '\e[31m%s\e[0m\n' "$*" >&2; exit 1; }
+
+update() {
+    command -v cosign &>/dev/null ||
+        die "ai --update needs cosign to verify the image: https://docs.sigstore.dev/cosign/system_config/installation/"
+    local tag ref
+    tag=$(latest_tag)
+    [[ -n "$tag" ]] || die "no release found at $repo"
+    docker pull "$image:$tag" || die "pull failed: $image:$tag"
+    ref=$(docker image inspect "$image:$tag" --format '{{range .RepoDigests}}{{println .}}{{end}}' |
+        grep -m1 "^$image@sha256:") || die "no registry digest for $image:$tag"
+    cosign verify "$ref" \
+        --certificate-identity-regexp "^${repo//./\\.}/\\.github/workflows/release\\.yml@refs/tags/v" \
+        --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null ||
+        die "signature check failed for $ref; keeping the current image"
+    mkdir -p "$mrai_home"
+    printf '%s\n' "$ref" >"$pin_file"
+    printf '%s %s\n' "$(date +%s)" "$tag" >"$update_cache"
+    echo "mrai $tag verified and installed ($ref)"
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'EOF'
+Usage: ai [prompt...]   (no prompt: compose one interactively)
+
+Wrapper options:
+  --update   pull the newest release, verify it with cosign, and pin it
+
+Everything else goes to mrai in the container:
+
+EOF
+fi
+
+if [[ "${1:-}" == "--update" ]]; then
+    update
+    exit 0
+fi
+
+if [[ -f "$pin_file" ]] && ! docker image inspect "$run_image" &>/dev/null; then
+    die "pinned image $run_image is missing; run: ai --update"
+fi
 
 warn_if_outdated
 
@@ -147,7 +198,7 @@ fi
 
 prompt=$(printf '%s\n' "${prompt}" | sed -n '/[^[:space:]]/p')
 [[ -z "${prompt}" ]] && exit 0
-remember "$prompt"
+[[ "$prompt" == "-h" || "$prompt" == "--help" ]] || remember "$prompt"
 
 # docker would create a missing bind source as root
 mkdir -p "$data_dir" "$mrai_home/site"
@@ -168,7 +219,12 @@ if [[ -f "$mrai_home/mrai.yml" ]]; then
     mounts+=(-v "$mrai_home/mrai.yml:/tmp/mrai-home/mrai.yml:ro")
 fi
 
-docker run --rm -it \
+run_flags=(--rm -i)
+[[ -t 0 && -t 1 ]] && run_flags+=(-t)
+# CI probes the sandbox with this (tests/container/probe.sh)
+[[ -n "${MRAI_ENTRYPOINT:-}" ]] && run_flags+=(--entrypoint "$MRAI_ENTRYPOINT")
+
+docker run "${run_flags[@]}" \
 	--user "$(id -u):$(id -g)" \
 	--tmpfs /tmp \
 	--tmpfs /home/nonroot/.cache \
@@ -189,4 +245,4 @@ docker run --rm -it \
 	-e COLUMNS \
 	-e TERM \
 	-e COLORTERM \
-	"$image" "$prompt"
+	"$run_image" "$prompt"

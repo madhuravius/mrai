@@ -10,12 +10,14 @@
       integrity="{{ hljs.light_sri }}" crossorigin="anonymous" media="(prefers-color-scheme: light)">
 <link id="hl-dark" rel="stylesheet" href="{{ hljs.base }}/styles/monokai.min.css"
       integrity="{{ hljs.dark_sri }}" crossorigin="anonymous" media="(prefers-color-scheme: dark)">
-<link rel="stylesheet" href="../style.css?v={{ asset_version }}">
+<link rel="stylesheet" href="style.css">
 <script src="{{ hljs.base }}/highlight.min.js" integrity="{{ hljs.js_sri }}" crossorigin="anonymous" defer></script>
-<script src="../index.js" defer></script>
-<script src="../app.js?v={{ asset_version }}"></script>
+<script src="index.js" defer></script>
+<script src="app.js"></script>
 </head>
 <body>
+<p id="mrai-asset-check">This page's style.css or app.js did not load. Check that they sit next to
+this file, and see the browser console for the reason.</p>
 <button id="mrai-nav-toggle" class="icon-btn" type="button" aria-label="Toggle file list" title="Toggle file list">☰</button>
 <button id="mrai-theme" class="icon-btn" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">☾</button>
 

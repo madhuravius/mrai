@@ -90,10 +90,10 @@
     el.title = new Date(e.ts).toLocaleString() + '\n' + e.file;
   }
 
-  // pages live at site/<ws>/<topic>.html, so every link climbs to the site root first
-  function pageHref(e) {
-    return '../' + encodeURIComponent(e.ws) + '/' + encodeURIComponent(e.topic) + '.html';
-  }
+  // every page sits in the site folder itself (no subfolders: Safari is strict
+  // about local pages loading files from other folders)
+  function pageFile(e) { return e.ws + '--' + e.topic + '.html'; }
+  function pageHref(e) { return encodeURIComponent(pageFile(e)); }
 
   // one list item (search result or nav file) from <template id="tpl-item">
   function makeItem(e, title, terms) {
@@ -198,14 +198,14 @@
   function setupNav(index) {
     var nav = document.getElementById('mrai-nav');
     var files = document.getElementById('mrai-files');
-    var here = location.pathname.split('/').slice(-2).map(decodeURIComponent).join('/');
+    var here = decodeURIComponent(location.pathname.split('/').pop());
     var seen = {};
     index.forEach(function (e) { // index is newest first, so the first hit per topic is its latest
       var key = e.ws + '/' + e.topic;
       if (seen[key]) return;
       seen[key] = true;
       var li = makeItem(e, e.title, []);
-      if (here === e.ws + '/' + e.topic + '.html') li.classList.add('active');
+      if (here === pageFile(e)) li.classList.add('active');
       li.querySelector('.pick').addEventListener('click', function () { location.href = pageHref(e); });
       files.append(li);
     });
@@ -247,6 +247,8 @@
   }
 
   document.addEventListener('DOMContentLoaded', function () {
+    var check = document.getElementById('mrai-asset-check');
+    if (check) check.remove();
     var index = window.MRAI_INDEX || [];
     setupThemeButton();
     setupSearch(index);

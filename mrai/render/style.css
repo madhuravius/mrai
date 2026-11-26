@@ -1,19 +1,26 @@
-/* Light/dark: color-scheme follows the OS unless app.js pins data-theme. */
-:root { color-scheme: light dark; }
-:root[data-theme="light"] { color-scheme: light; }
-:root[data-theme="dark"] { color-scheme: dark; }
+/* Light/dark follows the OS unless app.js pins data-theme. The dark values are
+   repeated rather than using the light-dark function, which older Safari lacks. */
 :root {
-  --bg: light-dark(#fff, #1e1f1c);
-  --fg: light-dark(#1f2328, #f8f8f2);
-  --muted: light-dark(#57606a, #cfcfc2);
-  --border: light-dark(#d1d5da, #49483e);
-  --line: light-dark(#eaecef, #3e3d32);
-  --code: light-dark(#f6f8fa, #272822);
-  --btn: light-dark(#e1e4e8, #3e3d32);
-  --link: light-dark(#0969da, #66d9ef);
-  --mark: light-dark(#fff3a3, #e6db74);
+  color-scheme: light;
+  --bg: #fff; --fg: #1f2328; --muted: #57606a; --border: #d1d5da; --line: #eaecef;
+  --code: #f6f8fa; --btn: #e1e4e8; --link: #0969da; --mark: #fff3a3;
   --nav-width: 300px;
 }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #1e1f1c; --fg: #f8f8f2; --muted: #cfcfc2; --border: #49483e; --line: #3e3d32;
+    --code: #272822; --btn: #3e3d32; --link: #66d9ef; --mark: #e6db74;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #1e1f1c; --fg: #f8f8f2; --muted: #cfcfc2; --border: #49483e; --line: #3e3d32;
+  --code: #272822; --btn: #3e3d32; --link: #66d9ef; --mark: #e6db74;
+}
+
+/* Shown only when an asset failed to load: style.css hides it, app.js removes it. */
+#mrai-asset-check { display: none; }
 
 body {
   font-family: system-ui; max-width: 72ch; margin: 2rem auto; line-height: 1.6;

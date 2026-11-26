@@ -103,4 +103,6 @@ docker run --rm -it \
 	-e MRAI_HOST_DIR="$data_dir" \
 	-e MRAI_HOME=/tmp/mrai-home \
 	-e COLUMNS \
+	-e TERM \
+	-e COLORTERM \
 	"${MRAI_IMAGE:-ghcr.io/madhuravius/mrai}" "$prompt"

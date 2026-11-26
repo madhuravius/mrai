@@ -73,7 +73,9 @@ class Settings(BaseSettings):
     model: str | None = None  # MRAI_MODEL: default model override; CLI --model wins
 
     # thresholds
-    flash_threshold: float = 0.6
+    # Jev must be at least this sure a question is "complex" to escalate to pro;
+    # anything less (incl. a shaky "complex") stays on flash.
+    pro_threshold: float = 0.7
     multi_loop_threshold: float = 0.65
     web_screen_threshold: float = 0.6  # web_fetch: Jev URL-ranking keep threshold
 
@@ -86,7 +88,10 @@ class Settings(BaseSettings):
     # all three live in the per-workspace dir (default_mrai_dir / MRAI_DIR / --dir)
     session_file: str = "session.json"  # MRAI_SESSION_FILE — conversation roll
     memory_file: str = "memories.md"  # MRAI_MEMORY_FILE — long-term memory notes
-    max_history: int = 20  # MRAI_MAX_HISTORY — last-N messages trimmed from the session roll
+    routing_log: str = "routing.jsonl"  # MRAI_ROUTING_LOG — one line per routing decision
+    max_history: int = (
+        20  # MRAI_MAX_HISTORY — last-N messages (prompt + reply per turn) kept in the roll
+    )
 
     # web fetch
     web_budget: int = 3

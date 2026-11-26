@@ -169,6 +169,25 @@ def test_upstream_error_twice_exits_and_logs(pipeline, cli_hermetic):
     assert "retry failed" in (cli_hermetic / ".mrai" / "hello.md").read_text()
 
 
+def test_routing_decision_is_logged(pipeline, cli_hermetic, monkeypatch):
+    """Every run appends its route to routing.jsonl (Jev is offline here → fallback)."""
+    import json
+
+    monkeypatch.setattr(cli, "select_final_answer", lambda *a, **k: (0, [0.9], None, None))
+    pipeline([_answer(1)])
+    assert _ai("hello").exit_code == 0
+    lines = (cli_hermetic / ".mrai" / "routing.jsonl").read_text().splitlines()
+    rec = json.loads(lines[-1])
+    assert rec["query"] == "hello" and rec["source"] == "fallback" and rec["tier"] == "pro"
+    assert rec["jev_error"]
+
+
+def test_no_write_skips_routing_log(pipeline, cli_hermetic):
+    pipeline([_answer(1)])
+    assert _ai("--no-write", "hello").exit_code == 0
+    assert not (cli_hermetic / ".mrai" / "routing.jsonl").exists()
+
+
 def test_non_retryable_error_exits_without_retry(pipeline):
     pipeline(_upstream_error(400))  # a second pipeline call would fail on an empty script
     result = _ai("--no-write", "hello")

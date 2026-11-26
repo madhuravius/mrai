@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
-import subprocess
 from pathlib import Path
+
+from .spawn import safe_run
 
 
 class GitTools:
@@ -37,11 +38,9 @@ class GitTools:
 
     def _run(self, *argv: str) -> str:
         try:
-            proc = subprocess.run(
+            proc = safe_run(
                 ["git", *argv],
                 cwd=self._root,
-                capture_output=True,
-                text=True,
                 timeout=self._timeout,
                 env=self._env,
             )

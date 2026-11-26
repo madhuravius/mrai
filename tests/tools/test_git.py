@@ -57,3 +57,11 @@ def test_known_refs_short_full_and_remote_forms(git_repo):
         "origin/main",
         "refs/remotes/origin/main",
     } <= refs
+
+
+def test_run_captures_failure(tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise OSError("no git")
+
+    monkeypatch.setattr("mrai.tools.git.safe_run", boom)
+    assert GitTools(tmp_path).git_status() == "git tool error: OSError: no git"

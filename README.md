@@ -95,6 +95,20 @@ OpenRouter, set it or `route_enabled: false` (web fetch needs Jev). See
 
 ```bash
 uv run pytest
+make test-container   # sandbox checks against ./ai's real docker flags
+```
+
+## Verifying a release image
+
+`ai --update` pulls the newest release, verifies its signature with cosign, and
+pins `ai` to that digest; a failed check leaves the current image in place. A
+local `make install` / `make docker-build` replaces the pin. To verify by hand
+(cosign v3+):
+
+```bash
+cosign verify ghcr.io/madhuravius/mrai:v0.3.0 \
+  --certificate-identity-regexp '^https://github.com/madhuravius/mrai/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
 ## License

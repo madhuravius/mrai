@@ -27,7 +27,7 @@ _SECRET = (
     "WEB_FETCH REFUSED: the request carries what looks like a credential ({what}). "
     "Never put repo contents, keys or tokens in a URL or payload. Do not retry this request."
 )
-_LONG_QUERY = 100  # chars; longer query strings get a warning in the approval prompt
+_LONG_QUERY = 100
 _NOISE = "WEB_FETCH NOISE: Jev judged none of the candidates worth fetching. Propose different URLs or another angle."
 
 # Failure replies are prefixed with one of these so the tool can tell an
@@ -75,12 +75,7 @@ def _net_error_msg(url: str, exc: BaseException) -> str:
 
 
 def _resolve_and_check(host: str) -> str | None:
-    """Resolve *host* and return an error if any resolved IP is non-public.
-
-    Returns None when all addresses are public, or when resolution fails
-    (fail-open: DNS blips must not block legitimate URLs, and
-    `_guard_redirect` re-checks right before connect anyway).
-    """
+    """Fails open on DNS errors: `_guard_redirect` re-checks before connect."""
     try:
         infos = socket.getaddrinfo(host, None, 0, socket.SOCK_STREAM)
     except socket.gaierror:
@@ -108,14 +103,13 @@ def _validate_url(url: str) -> str | None:
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
-        return _resolve_and_check(host)  # <-- hostname now checked
+        return _resolve_and_check(host)
     if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
         return f"refusing non-public address {host!r}"
     return None
 
 
 def _query_warning(url: str) -> str | None:
-    """Flag a long query string: the usual place data gets smuggled out."""
     query = urllib.parse.urlparse(url).query
     if len(query) > _LONG_QUERY:
         return f"query string is {len(query)} chars: check it carries nothing from your repo"
@@ -349,7 +343,6 @@ class WebFetchTool:
             raise httpx.HTTPError(err)
 
     def _refusal(self, url: str) -> str | None:
-        """Why `url` may not be fetched (non-public, or outside the allowlist), else None."""
         if err := _validate_url(url):
             return err
         host = (urllib.parse.urlparse(url).hostname or "").lower()

@@ -17,7 +17,7 @@ def test_workspace_key_edge_names():
 
 
 def test_default_mrai_dir_lives_under_mrai_home(tmp_path):
-    assert mrai_home() == tmp_path / "mrai-home"  # conftest isolation
+    assert mrai_home() == tmp_path / "mrai-home"
     d = default_mrai_dir(Path("/w/api"))
     assert d.parent == tmp_path / "mrai-home" / "workspaces"
 
@@ -31,8 +31,8 @@ def test_yaml_layering_repo_overrides_shared(tmp_path, monkeypatch):
     (repo / ".mrai" / "mrai.yml").write_text("max_history: 3\n")
     monkeypatch.chdir(repo)
     s = Settings()
-    assert s.max_history == 3  # repo wins
-    assert s.tool_timeout == 11  # shared still applies
+    assert s.max_history == 3
+    assert s.tool_timeout == 11
 
 
 def test_yaml_path_that_is_a_directory_is_ignored(tmp_path, monkeypatch):

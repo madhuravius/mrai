@@ -68,13 +68,8 @@ def test_run_captures_failure(tmp_path, monkeypatch):
     assert GitTools(tmp_path).git_status() == "git tool error: OSError: no git"
 
 
-# --- hostile repo config -----------------------------------------------------
-# Asking about a cloned repo must not run commands its .git/config names.
-
-
 @pytest.fixture
 def hostile_repo(git_repo):
-    """A repo whose config names a command at every hook git consults on status/diff."""
     (git_repo / ".gitattributes").write_text("*.txt filter=evil diff=evil\n")
     _git(git_repo, "add", ".gitattributes")
     for key, cmd in {
@@ -85,7 +80,7 @@ def hostile_repo(git_repo):
         "filter.evil.process": "touch PWNED_process",
     }.items():
         _git(git_repo, "config", key, cmd)
-    (git_repo / "a.txt").write_text("two\n")  # a modified *.txt, so every hook is relevant
+    (git_repo / "a.txt").write_text("two\n")
     return git_repo
 
 
@@ -95,9 +90,6 @@ def test_hostile_repo_config_runs_nothing(hostile_repo):
     assert "+two" in tools.git_diff()
     assert "+two" in tools.git_compare("main")
     assert list(hostile_repo.glob("PWNED*")) == []
-
-
-# --- denied files never appear in diffs --------------------------------------
 
 
 @pytest.fixture
@@ -138,7 +130,7 @@ def test_asking_for_a_folder_still_leaves_out_its_denied_files(repo_with_secrets
 def test_extra_denied_patterns_apply(repo_with_secrets):
     out = GitTools(repo_with_secrets, denied_patterns=["**/a.txt"]).git_diff()
     assert "+two" not in out
-    assert "hunter2" in out  # only the patterns given are applied
+    assert "hunter2" in out
 
 
 @pytest.mark.parametrize("path", [":(top)", ":!a.txt", "../x", "/etc/passwd"])

@@ -39,17 +39,11 @@ VERSION = _package_version()
 
 
 def mrai_home() -> Path:
-    """Root of all mrai state: MRAI_HOME, else ~/.mrai. Holds the shared mrai.yml."""
     return Path(os.getenv("MRAI_HOME") or Path.home() / ".mrai")
 
 
 def workspace_key(root: Path) -> str:
-    """Stable per-directory key: `<basename-slug>-<sha256(path)[:8]>`.
-
-    The hash keeps same-named checkouts (~/a/api vs ~/b/api) apart; the slug
-    keeps it readable. Byte-level so the `./ai` wrapper can mirror it exactly
-    in shell -- keep the two in sync.
-    """
+    """`<basename-slug>-<sha256(path)[:8]>`; mirrored in ./ai, keep in sync."""
     path = str(root)
     name = re.sub(rb"[^a-z0-9]+", b"-", Path(path).name.encode().lower()).decode()
     name = name.strip("-")[:40].rstrip("-") or "root"
@@ -57,7 +51,6 @@ def workspace_key(root: Path) -> str:
 
 
 def default_mrai_dir(root: Path) -> Path:
-    """Per-workspace state dir (session roll, logbook, memories), so repos never share context."""
     return mrai_home() / "workspaces" / workspace_key(root)
 
 
@@ -73,9 +66,7 @@ class Settings(BaseSettings):
     model: str | None = None  # MRAI_MODEL: default model override; CLI --model wins
 
     # thresholds
-    # Jev must be at least this sure a question is "complex" to escalate to pro;
-    # anything less (incl. a shaky "complex") stays on flash.
-    pro_threshold: float = 0.7
+    pro_threshold: float = 0.7  # min Jev confidence in "complex" to use pro
     multi_loop_threshold: float = 0.65
     web_screen_threshold: float = 0.6  # web_fetch: Jev URL-ranking keep threshold
 
@@ -85,13 +76,10 @@ class Settings(BaseSettings):
     max_requests: int = 100  # MRAI_MAX_REQUESTS
 
     # session history + long-term memory (CLI-injected; the model never writes these)
-    # all three live in the per-workspace dir (default_mrai_dir / MRAI_DIR / --dir)
     session_file: str = "session.json"  # MRAI_SESSION_FILE — conversation roll
     memory_file: str = "memories.md"  # MRAI_MEMORY_FILE — long-term memory notes
-    routing_log: str = "routing.jsonl"  # MRAI_ROUTING_LOG — one line per routing decision
-    max_history: int = (
-        20  # MRAI_MAX_HISTORY — last-N messages (prompt + reply per turn) kept in the roll
-    )
+    routing_log: str = "routing.jsonl"  # MRAI_ROUTING_LOG
+    max_history: int = 20  # MRAI_MAX_HISTORY — last-N messages kept in the roll
 
     # web fetch
     web_budget: int = 3
@@ -104,8 +92,7 @@ class Settings(BaseSettings):
     connect_timeout: float = 3.0  # fail fast on a hung connection
     read_timeout: float = 5.0  # fail fast if the server dribbles bytes
     user_agent: str = f"mrai/{VERSION} (read-only dev agent)"
-    # web_fetch only reaches these domains (and their subdomains), redirects included.
-    # Empty = any public host. e.g. in mrai.yml: web_allowed_domains: [docs.python.org, github.com]
+    # empty = any public host
     web_allowed_domains: list[str] = Field(default_factory=list)
 
     provider: str = "openrouter"  # MRAI_PROVIDER: "openrouter" | "openai"
@@ -133,7 +120,6 @@ class Settings(BaseSettings):
             init_settings,
             env_settings,
             dotenv_settings,
-            # shared ~/.mrai/mrai.yml first, then the repo's .mrai/mrai.yml overrides it
             YamlConfigSettingsSource(
                 settings_cls, yaml_file=[mrai_home() / "mrai.yml", Path(".mrai/mrai.yml")]
             ),

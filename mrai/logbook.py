@@ -101,8 +101,6 @@ class Logbook:
         if memory_file.is_file():
             text = memory_file.read_text(encoding="utf-8").strip()
             if len(text) > memory_chars:
-                # the file is append-only, so keep the newest notes (the tail),
-                # cut on a line boundary
                 tail = text[-memory_chars:]
                 text = "… [older notes truncated]\n" + tail[tail.find("\n") + 1 :]
             bits.append(f"Memory notes (newest last):\n{text}")

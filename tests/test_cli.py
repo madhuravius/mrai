@@ -46,9 +46,7 @@ def _answer(n: int):
 
 
 class _ScriptedPipeline:
-    """`pipeline(*outcomes)` queues outcomes: each pipeline call raises the next
-    one if it is an exception, else returns it as the writer results.
-    `histories` records the session history each call received."""
+    """Each pipeline call raises or returns the next queued outcome."""
 
     def __init__(self):
         self.outcomes: list = []
@@ -73,9 +71,6 @@ def pipeline(cli_hermetic, monkeypatch):
     monkeypatch.setattr(cli, "build_writers", lambda *a, **k: [object()] * 3)
     monkeypatch.setattr(cli, "_run_pipeline", script.run)
     return script
-
-
-# --- argument handling -------------------------------------------------------
 
 
 def test_missing_key_exits_gracefully(cli_hermetic):
@@ -110,10 +105,7 @@ def test_sandbox_without_bwrap_says_why(cli_hermetic, monkeypatch):
 def test_no_sandbox_skips_bwrap(cli_hermetic, monkeypatch):
     monkeypatch.delenv("MRAI_SANDBOXED")
     monkeypatch.setattr(cli, "_enter_sandbox", lambda **k: pytest.fail("sandboxed"))
-    assert _ai("--no-sandbox").exit_code == 0  # no query: prints help
-
-
-# --- picking the final answer ------------------------------------------------
+    assert _ai("--no-sandbox").exit_code == 0
 
 
 def test_jev_picks_best_candidate(pipeline, monkeypatch):
@@ -122,7 +114,7 @@ def test_jev_picks_best_candidate(pipeline, monkeypatch):
     result = _ai("--no-write", "hello")
     assert result.exit_code == 0
     assert "3 · T3" in result.output and "0.90" in result.output and "→ chosen" in result.output
-    assert "m3" in result.output  # the winner's markdown is printed
+    assert "m3" in result.output
 
 
 def test_without_jev_first_candidate_wins(pipeline, monkeypatch):
@@ -135,7 +127,7 @@ def test_without_jev_first_candidate_wins(pipeline, monkeypatch):
 
 
 def test_single_candidate_skips_jev(pipeline, monkeypatch):
-    monkeypatch.setattr(cli, "select_final_answer", pytest.fail)  # must not be called
+    monkeypatch.setattr(cli, "select_final_answer", pytest.fail)
     pipeline([_answer(1)])
     result = _ai("--no-write", "hello")
     assert result.exit_code == 0
@@ -148,9 +140,6 @@ def test_all_candidates_failing_exits(pipeline):
     result = _ai("hello")
     assert result.exit_code == 1
     assert "all candidates failed" in result.output
-
-
-# --- failures and retries ----------------------------------------------------
 
 
 def test_upstream_error_is_retried_once(pipeline):
@@ -170,7 +159,6 @@ def test_upstream_error_twice_exits_and_logs(pipeline, cli_hermetic):
 
 
 def test_routing_decision_is_logged(pipeline, cli_hermetic, monkeypatch):
-    """Every run appends its route to routing.jsonl (Jev is offline here → fallback)."""
     import json
 
     monkeypatch.setattr(cli, "select_final_answer", lambda *a, **k: (0, [0.9], None, None))
@@ -190,7 +178,7 @@ def test_no_write_skips_routing_log(pipeline, cli_hermetic):
 
 
 def test_non_retryable_error_exits_without_retry(pipeline):
-    pipeline(_upstream_error(400))  # a second pipeline call would fail on an empty script
+    pipeline(_upstream_error(400))
     result = _ai("--no-write", "hello")
     assert result.exit_code == 1
     assert "run failed" in result.output and "retrying" not in result.output
@@ -252,9 +240,6 @@ def test_log_failure_respects_no_write(cli_hermetic):
     assert not (cli_hermetic / ".mrai").exists()
 
 
-# --- workspace-bound session history ----------------------------------------
-
-
 def _workspace_error() -> cli.UserError:
     return cli.UserError(
         "The message history continues in workspace `local:/elsewhere`, but none of "
@@ -273,11 +258,8 @@ def test_history_from_another_workspace_is_dropped(pipeline, monkeypatch):
 def test_workspace_error_without_history_propagates(pipeline):
     pipeline(_workspace_error())
     result = _ai("hello")
-    assert pipeline.histories == [None]  # nothing to drop: no silent retry loop
+    assert pipeline.histories == [None]
     assert isinstance(result.exception, cli.UserError)
-
-
-# --- state dir and renders ---------------------------------------------------
 
 
 def test_write_render_writes_html_under_state_dir(tmp_path, monkeypatch):
@@ -285,13 +267,13 @@ def test_write_render_writes_html_under_state_dir(tmp_path, monkeypatch):
     path = cli._write_render(tmp_path / "state", "hello world", "# Hi\n\nSee `x`.")
     assert path == tmp_path / "state" / "renders" / "hello-world.html"
     assert "<h1>Hi</h1>" in path.read_text()
-    assert not (tmp_path / ".mrai").exists()  # never written into the (possibly ro) repo
+    assert not (tmp_path / ".mrai").exists()
 
 
 def test_host_path_maps_container_state_dir_to_host(tmp_path, monkeypatch):
     state = tmp_path / "state"
     inside = state / "renders" / "x.html"
-    assert cli._host_path(inside, state) == inside  # no mapping outside the container
+    assert cli._host_path(inside, state) == inside
     monkeypatch.setenv("MRAI_HOST_DIR", "/home/u/.mrai/workspaces/repo-1234abcd")
     assert cli._host_path(inside, state) == cli.Path(
         "/home/u/.mrai/workspaces/repo-1234abcd/renders/x.html"
@@ -305,14 +287,14 @@ def test_resolve_mrai_dir_precedence(tmp_path, monkeypatch):
     assert default.name.startswith("repo-")
     monkeypatch.setenv("MRAI_DIR", str(tmp_path / "env"))
     assert cli.resolve_mrai_dir(None, repo) == tmp_path / "env"
-    assert cli.resolve_mrai_dir(tmp_path / "flag", repo) == tmp_path / "flag"  # --dir wins
+    assert cli.resolve_mrai_dir(tmp_path / "flag", repo) == tmp_path / "flag"
 
 
 def test_default_state_dir_differs_per_workspace(tmp_path):
     a = cli.resolve_mrai_dir(None, tmp_path / "x" / "api")
     b = cli.resolve_mrai_dir(None, tmp_path / "y" / "api")
-    assert a != b  # same basename, different checkouts: no shared session
-    assert a == cli.resolve_mrai_dir(None, tmp_path / "x" / "api")  # stable
+    assert a != b
+    assert a == cli.resolve_mrai_dir(None, tmp_path / "x" / "api")
 
 
 def test_render_escapes_html_from_the_answer(tmp_path):
@@ -329,6 +311,6 @@ def test_render_csp_allows_only_its_own_script(tmp_path):
     csp = html.split('http-equiv="Content-Security-Policy" content="', 1)[1].split('"', 1)[0]
     script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
     digest = cli.base64.b64encode(cli.hashlib.sha256(script.encode()).digest()).decode()
-    assert f"'sha256-{digest}'" in csp  # the inline script's hash matches what is served
-    assert "img-src data:" in csp  # a remote image (data leak on open) is blocked
-    assert html.count('integrity="sha512-') == 2  # both CDN files pinned
+    assert f"'sha256-{digest}'" in csp
+    assert "img-src data:" in csp
+    assert html.count('integrity="sha512-') == 2

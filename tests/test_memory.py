@@ -46,9 +46,7 @@ def test_trim_history_keeps_all_when_unbounded():
 
 
 def test_trim_drops_turn_without_reply():
-    """A prompt with no reply (failed run) is dropped: it would leave two user
-    messages in a row next run."""
-    hist = _roll(3)  # q0/a0, then a dangling q2
+    hist = _roll(3)
     assert _trim_history(hist, 0) == hist[:2]
 
 
@@ -120,7 +118,6 @@ def test_memory_injected_via_deps_on_every_run():
 
 
 def _tool_roll() -> list[Any]:
-    """Two turns whose research used tools: request/response pairs carry tool calls."""
 
     async def run() -> list[Any]:
         agent = Agent(model=TestModel(), instructions="x")
@@ -150,12 +147,10 @@ def _pairs_ok(msgs: list[Any]) -> bool:
 
 
 def test_trim_never_cuts_mid_tool_exchange():
-    """Regression: a count cut used to keep tool results whose call was dropped,
-    and the provider rejected every follow-up with a 400."""
     from pydantic_ai.messages import ToolCallPart, ToolReturnPart
 
     hist = _tool_roll()
-    assert len(hist) > 4  # the raw roll interleaves tool traffic
+    assert len(hist) > 4
     for n in range(0, len(hist) + 1):
         trimmed = _trim_history(hist, n)
         parts = [p for m in trimmed for p in m.parts]
@@ -165,11 +160,10 @@ def test_trim_never_cuts_mid_tool_exchange():
 
 
 def test_load_repairs_roll_saved_mid_exchange(tmp_path: Path):
-    """A roll written by the old trimming (starts with orphan tool returns) loads clean."""
     from pydantic_ai.messages import ModelMessagesTypeAdapter
 
     hist = _tool_roll()
     path = tmp_path / "session.json"
-    path.write_bytes(ModelMessagesTypeAdapter.dump_json(hist[2:]))  # cut mid-exchange
+    path.write_bytes(ModelMessagesTypeAdapter.dump_json(hist[2:]))
     loaded = _load_history(path, 20)
     assert _pairs_ok(loaded) and _prompt(loaded[0]) == "second question"

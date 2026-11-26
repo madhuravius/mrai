@@ -20,7 +20,6 @@ def _dns(*addrs: str):
 
 @pytest.fixture(autouse=True)
 def public_dns():
-    """Every hostname resolves to a public IP unless a test patches DNS itself (no real lookups)."""
     with patch("mrai.webfetch.socket.getaddrinfo", return_value=_dns("93.184.216.34")):
         yield
 
@@ -38,7 +37,6 @@ def _scored(*pairs) -> list[ScoredUrl]:
 
 
 def _tool(handler=_html, *, client=None, **kw) -> WebFetchTool:
-    """A tool where Jev rates every URL 0.9 and the human approves the first one."""
     kw.setdefault("screen", lambda urls, reason: _scored(*[(u, 0.9) for u in urls]))
     kw.setdefault("approve", lambda keepers, meta: [keepers[0].url])
     return WebFetchTool(client=client or _client(handler), **kw)
@@ -53,9 +51,6 @@ def _raises(exc):
         raise exc(request=req, message="boom")
 
     return handler
-
-
-# --- Jev screening + human approval ------------------------------------------
 
 
 def test_jev_ranks_and_filters_then_human_approves():
@@ -112,7 +107,7 @@ def test_repeated_denials_extinguish_the_tool():
     assert tool.denials == 1
     tool.web_fetch(["https://b.example/x"], "r")
     assert "EXTINGUISHED" in tool.web_fetch(["https://c.example/x"], "r")
-    assert "DISABLED" in tool.web_fetch(["https://d.example/x"], "r")  # skips screen + prompt
+    assert "DISABLED" in tool.web_fetch(["https://d.example/x"], "r")
 
 
 def test_zero_budget_refuses_before_asking_jev():
@@ -138,16 +133,13 @@ def test_fetch_returns_all_approved():
     assert tool.fetched == 2
 
 
-# --- the terminal approval prompt (no `approve` callback) --------------------
-
-
 @pytest.mark.parametrize(
     "typed,expected",
     [
         ("2", ["https://b.example"]),
         ("1, 2", ["https://a.example", "https://b.example"]),
-        ("9 x", []),  # out-of-range and junk are ignored
-        ("", []),  # Enter = approve none
+        ("9 x", []),
+        ("", []),
     ],
 )
 def test_terminal_prompt_approves_typed_choices(monkeypatch, typed, expected):
@@ -176,11 +168,7 @@ def test_terminal_prompt_without_stdin_denies_all(monkeypatch):
     )
 
 
-# --- jev_screen_urls (the decisions API call) --------------------------------
-
-
 def _decisions(monkeypatch, response):
-    """Make the decisions API return `response` (or raise it, if an exception)."""
 
     def post(url, **kwargs):
         if isinstance(response, Exception):
@@ -224,9 +212,6 @@ def test_default_screen_accumulates_cost(monkeypatch):
     assert tool.screen_cost == pytest.approx(0.004)
 
 
-# --- fetch failures ----------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "handler,expected",
     [
@@ -240,7 +225,7 @@ def test_fetch_failures_tell_the_model_to_reassess(handler, expected):
     tool = _tool(handler)
     out = tool.web_fetch(["https://a.example/x"], "r")
     assert expected in out and "REASSESS" in out
-    assert tool.fetched == 1  # a failed fetch still spends budget
+    assert tool.fetched == 1
 
 
 def test_unexpected_client_error_fails_the_fetch_not_the_tool():
@@ -289,11 +274,7 @@ def test_payload_sent_exactly_as_submitted_over_get():
     assert '"ok": true' in out
 
 
-# --- SSRF guards: redirects and DNS ------------------------------------------
-
-
 def _redirecting_tool(to: str) -> WebFetchTool:
-    """/page 302s to `to`; every hop goes through the tool's redirect guard."""
 
     def handler(req):
         if req.url.path == "/page":
@@ -340,11 +321,11 @@ def test_redirect_to_dns_rebind_target_is_blocked():
 @pytest.mark.parametrize(
     "addrs,bad",
     [
-        (["10.0.0.1"], "10.0.0.1"),  # private
-        (["169.254.169.254"], "169.254.169.254"),  # cloud metadata (IMDS)
-        (["169.254.1.1"], "169.254.1.1"),  # link-local
-        (["127.0.0.1"], "127.0.0.1"),  # loopback
-        (["8.8.8.8", "10.0.0.1", "1.1.1.1"], "10.0.0.1"),  # one bad record is enough
+        (["10.0.0.1"], "10.0.0.1"),
+        (["169.254.169.254"], "169.254.169.254"),
+        (["169.254.1.1"], "169.254.1.1"),
+        (["127.0.0.1"], "127.0.0.1"),
+        (["8.8.8.8", "10.0.0.1", "1.1.1.1"], "10.0.0.1"),
     ],
 )
 def test_hostname_resolving_to_non_public_ip_is_refused(addrs, bad):
@@ -376,9 +357,6 @@ def test_literal_non_public_urls_are_refused(url):
     assert _validate_url(url) is not None
 
 
-# --- exfiltration guards -----------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "urls,payload",
     [
@@ -401,7 +379,7 @@ def test_configured_api_key_is_never_sent():
 def test_allowlist_limits_domains():
     tool = _tool(settings=Settings(web_allowed_domains=["docs.example"]))
     assert "WEB_FETCHED" in tool.web_fetch(["https://api.docs.example/v3/"], "r")
-    out = tool.web_fetch(["https://evildocs.example/"], "r")  # suffix match is on whole labels
+    out = tool.web_fetch(["https://evildocs.example/"], "r")
     assert "REFUSED" in out and "not in web_allowed_domains" in out
 
 
@@ -417,4 +395,4 @@ def test_prompt_warns_about_long_query_and_shows_url_verbatim(monkeypatch, capsy
     WebFetchTool(client=_client())._terminal_prompt(_scored((url, 0.9)), None, "r")
     out = capsys.readouterr().out
     assert "query string is" in out
-    assert "[red]hidden[/red]" in out  # markup in a URL is shown, not interpreted
+    assert "[red]hidden[/red]" in out

@@ -1,10 +1,4 @@
-"""Spot credentials in text the model wants to send off this machine.
-
-A prompt-injected file or page can ask the model to "fetch" a URL that carries
-repo data in its query string or payload. This catches the cheap cases (your own
-API key, well-known token formats, also once URL-decoded); it does not catch
-deliberately encoded data, which is why the human still approves every fetch.
-"""
+"""Spot credentials in text the model wants to send off this machine."""
 
 from __future__ import annotations
 
@@ -27,10 +21,7 @@ _PATTERNS: dict[str, re.Pattern[str]] = {
 
 
 def find_secret(text: str | None, known: Iterable[str | None] = ()) -> str | None:
-    """Name the first credential found in `text` (raw or URL-decoded), else None.
-
-    `known` are exact secret values to look for (e.g. the configured API key).
-    """
+    """Name the first credential found in `text` (raw or URL-decoded), else None."""
     if not text:
         return None
     variants = {text, urllib.parse.unquote_plus(text)}

@@ -57,9 +57,9 @@ def test_forced_subagents_override(monkeypatch):
     "choice,confidence,multi_loop,expected,subagents",
     [
         ("simple", 0.95, 0.2, FLASH_MODEL, False),  # simple + confident → flash
-        ("simple", 0.5, 0.2, FLASH_MODEL, False),  # shaky "simple" → still flash
-        ("complex", 0.6, 0.2, FLASH_MODEL, False),  # shaky "complex" → flash (default)
-        ("complex", 0.7, 0.3, PRO_MODEL, False),  # confident complex (>= 0.7) → pro
+        ("simple", 0.5, 0.2, FLASH_MODEL, False),
+        ("complex", 0.6, 0.2, FLASH_MODEL, False),
+        ("complex", 0.7, 0.3, PRO_MODEL, False),
         ("complex", 0.9, 0.9, PRO_MODEL, True),  # multi-loop → subagents on
     ],
 )
@@ -156,8 +156,6 @@ def test_select_final_answer_out_of_range(monkeypatch):
 
 
 def test_payload_classifies_by_scope_not_difficulty():
-    """Explaining code in one area is 'simple'; the criteria must say so, or Jev
-    sends nearly every codebase question to pro."""
     from mrai.settings import Settings
 
     crit = router._payload(Settings(), "q")["questions"]["difficulty"]["criteria"]

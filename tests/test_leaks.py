@@ -15,7 +15,7 @@ from mrai.leaks import find_secret
         (
             "q=%2D%2D%2D%2D%2DBEGIN%20RSA%20PRIVATE%20KEY%2D%2D%2D%2D%2D",
             "private key",
-        ),  # URL-encoded
+        ),
     ],
 )
 def test_finds_well_known_credentials(text, kind):
@@ -31,4 +31,4 @@ def test_finds_the_configured_key_even_url_encoded():
     "text", [None, "", "https://docs.example/library/re.html?highlight=sk", "skeleton-key"]
 )
 def test_ordinary_text_passes(text):
-    assert find_secret(text, ["short", None]) is None  # keys under 8 chars are ignored
+    assert find_secret(text, ["short", None]) is None

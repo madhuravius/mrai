@@ -2,15 +2,10 @@
 set -euo pipefail
 
 # Usage: ai [prompt...]
-#   No args: type the prompt at a readline prompt. Up/Down step through this
-#   workspace's past prompts, Ctrl-R searches them; Enter on an empty line opens
-#   gum for a long multi-line prompt instead.
 
-# Physical path: matches Path.cwd() inside the container, so the workspace id
-# (local:<path>) and the state-dir key below agree with native `mrai` runs.
 pwd=$(pwd -P)
 
-# Mirror of mrai.settings.workspace_key: <basename-slug>-<sha256(path)[:8]>.
+# keep in sync with mrai.settings.workspace_key
 sha256() { if command -v sha256sum &>/dev/null; then sha256sum; else shasum -a 256; fi; }
 name=$(basename "$pwd" | LC_ALL=C tr 'A-Z' 'a-z' | LC_ALL=C sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')
 name=$(printf '%s' "${name:0:40}" | sed -E 's/-+$//')
@@ -18,17 +13,15 @@ key="${name:-root}-$(printf '%s' "$pwd" | sha256 | cut -c1-8)"
 
 mrai_home="${MRAI_HOME:-$HOME/.mrai}"
 data_dir="$mrai_home/workspaces/$key"
-# Kept outside data_dir: that dir is mounted writable into the container, and
-# nothing in there should be able to put words in your next prompt.
+# outside data_dir: the container can write there
 hist_file="$mrai_home/history/$key"
 
-# History stores one prompt per line (multi-line prompts are joined with spaces).
 remember() {
     local line tmp
     line=$(printf '%s' "$1" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
     [[ -z "$line" ]] && return 0
     (
-        umask 077                       # your prompts are nobody else's business
+        umask 077
         mkdir -p "$(dirname "$hist_file")"
         touch "$hist_file"
         tmp="$hist_file.$$"
@@ -50,7 +43,7 @@ compose_long() {
 
 compose() {
     local line
-    unset HISTFILE                      # never append this script's own commands
+    unset HISTFILE
     history -c
     [[ -f "$hist_file" ]] && history -r "$hist_file"
     if command -v gum &>/dev/null; then
@@ -76,8 +69,7 @@ prompt=$(printf '%s\n' "${prompt}" | sed -n '/[^[:space:]]/p')
 [[ -z "${prompt}" ]] && exit 0
 remember "$prompt"
 
-# Create it as the invoking user: if docker creates a missing bind source it is
-# root-owned and the (non-root) container can't write the session or logbook.
+# docker would create a missing bind source as root
 mkdir -p "$data_dir"
 
 mounts=(-v "$data_dir:/tmp/mrai-data" -v "$pwd:$pwd:ro")

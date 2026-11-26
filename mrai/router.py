@@ -220,7 +220,6 @@ def resolve_route(
     use_subagents = (
         subagents if subagents is not None else verdict.multi_loop >= s.multi_loop_threshold
     )
-    # flash by default: escalate only when Jev is confidently "complex"
     pro_needed = verdict.choice == "complex" and verdict.confidence >= s.pro_threshold
     flash_ok = not pro_needed
     model = s.flash_model if flash_ok else s.pro_model

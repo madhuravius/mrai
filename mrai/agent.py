@@ -124,7 +124,7 @@ def _make(
         webfetch = WebFetchTool(budget=web_fetch_budget, settings=s)
         tools.append(webfetch.web_fetch)
     if tools_on:
-        git_tools = GitTools(root)
+        git_tools = GitTools(root, denied_patterns=[*DEFAULT_DENIED_PATTERNS, *deny])
         tools += [git_tools.git_diff, git_tools.git_status, git_tools.git_compare]
     agent = Agent(
         model=_model(s, key, model_name),

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import os
 import shutil
@@ -451,13 +453,56 @@ async def _run_pipeline(
     return research, list(results), _merge_usage(r_usage, *w_usages)
 
 
+_HLJS = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1"
+# Subresource Integrity: the browser refuses these if the CDN ever serves other bytes.
+_HLJS_CSS_SRI = "sha512-0aPQyyeZrWj9sCA46UlmWgKOP0mUipLQ6OZXu8l4IcAmD2u31EPEy9VcIMvl7SoAaKe8bLXZhYoMaE/in+gcgA=="
+_HLJS_JS_SRI = "sha512-EBLzUL8XLl+va/zAsmXwS7Z2B1F9HUHkZwyS/VKwh3S7T/U0nF4BaU29EP/ZSf6zgiIxYAnKLu6bJ8dqpmX5uw=="
+_RENDER_SCRIPT = """
+hljs.highlightAll();
+document.querySelectorAll('pre').forEach(function(pre){
+  var btn = document.createElement('button');
+  btn.className = 'copy-btn'; btn.textContent = 'Copy';
+  btn.onclick = function(){
+    var code = pre.querySelector('code');
+    navigator.clipboard.writeText((code||pre).textContent).then(function(){
+      btn.textContent = 'Copied!';
+      setTimeout(function(){ btn.textContent = 'Copy'; }, 2000);
+    });
+  };
+  pre.appendChild(btn);
+});
+"""
+
+
+def _render_csp() -> str:
+    """Only our own inline script and the pinned CDN files may run; nothing may
+    load remotely otherwise (a remote <img> would leak data when the page opens)."""
+    digest = base64.b64encode(hashlib.sha256(_RENDER_SCRIPT.encode()).digest()).decode()
+    return "; ".join(
+        [
+            "default-src 'none'",
+            f"script-src 'sha256-{digest}' {_HLJS}/highlight.min.js",
+            f"style-src 'unsafe-inline' {_HLJS}/styles/",
+            "img-src data:",
+            "base-uri 'none'",
+            "form-action 'none'",
+        ]
+    )
+
+
 def _write_render(mrai_dir: Path, topic: str, markdown: str) -> Path:
-    """HTML copy of the answer under <state dir>/renders (never in the repo, which may be mounted ro)."""
-    md = MarkdownIt("gfm-like", {"linkify": True})
+    """HTML copy of the answer under <state dir>/renders (never in the repo, which may be mounted ro).
+
+    The answer is model output that repo files or fetched pages may have steered,
+    so raw HTML in it is escaped (html=False), never rendered.
+    """
+    md = MarkdownIt("gfm-like", {"linkify": True, "html": False})
     body = md.render(markdown)
     html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github.min.css">
+<meta http-equiv="Content-Security-Policy" content="{_render_csp()}">
+<meta name="referrer" content="no-referrer">
+<link rel="stylesheet" href="{_HLJS}/styles/github.min.css" integrity="{_HLJS_CSS_SRI}" crossorigin="anonymous">
 <style>
 body {{ font-family: system-ui; max-width: 72ch; margin: 2rem auto; line-height: 1.6; }}
 pre {{ position: relative; }}
@@ -469,24 +514,9 @@ pre code.hljs {{ padding: 1rem; border-radius: 6px; overflow-x: auto; }}
 }}
 pre:hover .copy-btn, .copy-btn:focus {{ opacity: 1; }}
 </style></head><body>{body}
-<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
-<script>hljs.highlightAll();</script>
-<script>
-(function(){{
-  document.querySelectorAll('pre').forEach(function(pre){{
-    var btn = document.createElement('button');
-    btn.className = 'copy-btn'; btn.textContent = 'Copy';
-    btn.onclick = function(){{
-      var code = pre.querySelector('code');
-      navigator.clipboard.writeText((code||pre).textContent).then(function(){{
-        btn.textContent = 'Copied!';
-        setTimeout(function(){{ btn.textContent = 'Copy'; }}, 2000);
-      }});
-    }};
-    pre.appendChild(btn);
-  }});
-}})();
-</script></body></html>"""
+<script src="{_HLJS}/highlight.min.js" integrity="{_HLJS_JS_SRI}" crossorigin="anonymous"></script>
+<script>{_RENDER_SCRIPT}</script>
+</body></html>"""
     path = mrai_dir / "renders" / f"{slugify(topic)}.html"
     _atomic_write_text(path=path, text=html)
     return path

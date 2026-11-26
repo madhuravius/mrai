@@ -99,6 +99,9 @@ class Settings(BaseSettings):
     connect_timeout: float = 3.0  # fail fast on a hung connection
     read_timeout: float = 5.0  # fail fast if the server dribbles bytes
     user_agent: str = f"mrai/{VERSION} (read-only dev agent)"
+    # web_fetch only reaches these domains (and their subdomains), redirects included.
+    # Empty = any public host. e.g. in mrai.yml: web_allowed_domains: [docs.python.org, github.com]
+    web_allowed_domains: list[str] = Field(default_factory=list)
 
     provider: str = "openrouter"  # MRAI_PROVIDER: "openrouter" | "openai"
     base_url: str | None = None  # MRAI_BASE_URL: OpenAI-compatible gateway (bifrost, LiteLLM, …)

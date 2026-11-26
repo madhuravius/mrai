@@ -23,7 +23,10 @@
   var savedTheme = store.get('mrai-theme');
   if (savedTheme) applyTheme(savedTheme);
 
-  // nav state must also be set before paint to avoid a layout jump
+  // nav state must also be set before paint to avoid a layout jump. Only the
+  // wide-screen docked/closed choice is remembered; the narrow-screen drawer
+  // always starts shut, so a choice made on a big screen can't cover a small one.
+  var NAV_DOCK_QUERY = '(min-width: 960px)'; // keep in step with style.css
   var savedNav = store.get('mrai-nav');
   if (savedNav) root.dataset.nav = savedNav;
 
@@ -147,7 +150,6 @@
       var show = open && terms.length > 0;
       panes.hidden = !show;
       count.hidden = !show;
-      root.classList.toggle('searching', show);
     }
 
     function run() {
@@ -209,11 +211,36 @@
       li.querySelector('.pick').addEventListener('click', function () { location.href = pageHref(e); });
       files.append(li);
     });
-    document.getElementById('mrai-nav-toggle').addEventListener('click', function () {
-      var next = getComputedStyle(nav).display === 'none' ? 'open' : 'closed';
-      root.dataset.nav = next;
-      store.set('mrai-nav', next);
+
+    var toggle = document.getElementById('mrai-nav-toggle');
+    var docked = window.matchMedia(NAV_DOCK_QUERY);
+    function closeDrawer() { root.classList.remove('nav-drawer'); }
+    function paint() {
+      toggle.setAttribute('aria-expanded', getComputedStyle(nav).display !== 'none');
+    }
+    toggle.addEventListener('click', function () {
+      if (docked.matches) {
+        var next = root.dataset.nav === 'closed' ? 'open' : 'closed';
+        root.dataset.nav = next;
+        store.set('mrai-nav', next);
+      } else {
+        root.classList.toggle('nav-drawer');
+      }
+      paint();
     });
+    document.addEventListener('mousedown', function (ev) {
+      if (root.classList.contains('nav-drawer') && !nav.contains(ev.target) &&
+          !toggle.contains(ev.target)) { closeDrawer(); paint(); }
+    });
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Escape' && root.classList.contains('nav-drawer')) {
+        closeDrawer(); paint(); toggle.focus();
+      }
+    });
+    var onResize = function () { closeDrawer(); paint(); };
+    if (docked.addEventListener) docked.addEventListener('change', onResize);
+    else docked.addListener(onResize); // Safari < 14
+    paint();
   }
 
   // ---- theme button, code blocks --------------------------------------------

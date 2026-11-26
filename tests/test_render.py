@@ -58,7 +58,7 @@ def test_render_escapes_html_from_the_answer(tmp_path):
 
 def test_title_is_escaped(tmp_path):
     html = render.write_page(_ws(tmp_path), "</title><script>x", "x").read_text()
-    assert "<title>&lt;/title&gt;&lt;script&gt;x</title>" in html
+    assert "<title>&lt;/title&gt;&lt;script&gt;x · mrai</title>" in html
 
 
 def test_csp_forbids_inline_eval_and_remote_images(tmp_path):
@@ -225,3 +225,30 @@ def test_reindex_removes_pages_from_the_old_layout_and_dead_topics(tmp_path):
     assert sorted(p.name for p in site.glob("*.html")) == ["a-1--t.html"]
     assert not (site / "a-1").exists()
     assert (site / "app.js").is_file() and (site / "index.js").is_file()
+
+
+def test_page_title_is_the_logs_display_title_not_the_slug(tmp_path):
+    ws = _ws(tmp_path)
+    Logbook(ws).append("how retry works", "How does retry work?", "q", "answer")
+    [page] = render.reindex(ws)
+    assert "<title>How does retry work? · mrai</title>" in page.read_text()
+    html = render.write_page(ws, "plain-topic", "x").read_text()
+    assert "<title>plain-topic · mrai</title>" in html
+
+
+def test_title_skips_a_failed_first_run_and_follows_the_newest_answer(tmp_path):
+    ws = _ws(tmp_path)
+    lb = Logbook(ws)
+    lb.append("t", "Run failed", "q", "> This run failed")
+    lb.append("t", "First real answer", "q2", "## A subheading\n\nbody")
+    lb.append("t", "Run failed", "q3", "> This run failed")
+    [page] = render.reindex(ws)
+    assert "<title>First real answer · mrai</title>" in page.read_text()
+    assert {e["title"] for e in _index(tmp_path)} == {"First real answer"}
+
+
+def test_title_of_a_topic_that_never_succeeded_says_so(tmp_path):
+    ws = _ws(tmp_path)
+    Logbook(ws).append("t", "Run failed", "q", "> This run failed")
+    [page] = render.reindex(ws)
+    assert "<title>Run failed · mrai</title>" in page.read_text()

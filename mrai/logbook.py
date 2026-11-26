@@ -16,7 +16,26 @@ def slugify(text: str) -> str:
 
 # Where `append` starts an entry: its `## title`, the optional stamp, then `**Q:**`.
 # Plain `## ` lines inside answers are the model's own subheadings, not entries.
-_ENTRY_START = re.compile(r"^## [^\n]*\n\n(?:<!-- mrai ts=[^\n]*-->\n\n)?\*\*Q:\*\* ", re.M)
+_ENTRY_START = re.compile(r"^## ([^\n]*)\n\n(?:<!-- mrai ts=[^\n]*-->\n\n)?\*\*Q:\*\* ", re.M)
+FAILED_TITLE = "Run failed"  # the title of the stub entry a failed run logs
+
+
+def topic_title(text: str, fallback: str) -> str:
+    """A topic log's display title: its newest answer's title, skipping failed runs.
+
+    The file's `# title` line is fixed when the topic is created, so a topic
+    whose first run failed would otherwise read "Run failed" for good. It is
+    used only when no run has succeeded yet; `fallback` when even that is missing.
+    """
+    for m in reversed(list(_ENTRY_START.finditer(text))):
+        heading = m.group(1).strip()
+        if heading and heading != FAILED_TITLE:
+            return heading
+    if text.startswith("# "):
+        return text.partition("\n")[0][2:].strip() or fallback
+    return fallback
+
+
 _STAMP = re.compile(r"^<!-- mrai ts=(\S+) cwd=(.*?) -->\n?", re.M)
 WORKSPACE_FILE = "workspace"
 STATS_MARKER = "<!-- mrai stats -->"  # run stats follow; not part of the answer
@@ -139,10 +158,9 @@ class Logbook:
             if exclude is not None and path == exclude:
                 continue
             text = path.read_text(encoding="utf-8")
-            title = path.stem
+            title = topic_title(text, path.stem)
             if text.startswith("# "):
-                first, _, text = text.partition("\n")
-                title = first[2:].strip() or title
+                text = text.partition("\n")[2]
             mtime = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(
                 timespec="seconds"
             )

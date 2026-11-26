@@ -23,7 +23,7 @@ from jinja2 import Environment, PackageLoader, select_autoescape
 from markdown_it import MarkdownIt
 from markupsafe import Markup
 
-from ..logbook import MARKER_LINE, Logbook, _atomic_write_text, slugify
+from ..logbook import MARKER_LINE, Logbook, _atomic_write_text, slugify, topic_title
 from ..settings import mrai_home, workspace_key
 
 HLJS = {
@@ -103,10 +103,14 @@ def page_path(mrai_dir: Path, topic: str) -> Path:
     return site_dir() / f"{mrai_dir.name}--{slugify(topic)}.html"
 
 
-def write_page(mrai_dir: Path, topic: str, markdown: str) -> Path:
-    """Write the topic's page for one answer, plus the shared assets it loads."""
+def write_page(mrai_dir: Path, topic: str, markdown: str, title: str | None = None) -> Path:
+    """Write the topic's page for one answer, plus the shared assets it loads.
+
+    `title` is the topic's display title (as the nav and search show it); the
+    page's file name always comes from `topic`.
+    """
     html = _env.get_template("page.html.j2").render(
-        title=topic,
+        title=title or topic,
         body=Markup(_markdown().render(MARKER_LINE.sub("", markdown))),
         csp=csp(),
         hljs=HLJS,
@@ -158,12 +162,15 @@ def reindex(current: Path | None = None, memory_name: str = "memories.md") -> li
     """Rebuild the whole site from every workspace (e.g. after upgrading mrai)."""
     if current is not None:
         record_workspace(current, Path.cwd())
-    pages = [
-        write_page(ws, path.stem, latest_answer(path.read_text(encoding="utf-8")))
-        for ws in workspace_dirs(current)
-        for path in sorted(ws.glob("*.md"))
-        if path.name != memory_name
-    ]
+    pages = []
+    for ws in workspace_dirs(current):
+        for path in sorted(ws.glob("*.md")):
+            if path.name == memory_name:
+                continue
+            text = path.read_text(encoding="utf-8")
+            pages.append(
+                write_page(ws, path.stem, latest_answer(text), topic_title(text, path.stem))
+            )
     write_index(current, memory_name)
     _remove_stale_pages(set(pages))
     return pages

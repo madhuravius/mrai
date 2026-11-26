@@ -23,16 +23,17 @@ Web
   attempts, after which the web line is extinguished: proceed from the local
   codebase only. Never retry a URL the tool reported as failed.
 
-Logs (.mrai/*.md)
-- Inspect `.mrai/` for past answers (skip `.mrai/renders/` — visual HTML copies,
-  not source content). If the query relates to an existing log,
-  return that file's `topic` (stem, no .md) so the answer appends there; else
-  propose a short kebab-case `topic` (max 5 words) and a short `title`.
+Logs (topics)
+- Past answers are logged by the CLI outside the repo, per workspace; you cannot
+  read them. If the query relates to a topic listed in the known-context block,
+  return that exact `topic` slug so the answer appends there; else propose a
+  short kebab-case `topic` (max 5 words) and a short `title`.
 
 Memory (injected, read-only)
-- When present, a "known context" block lists logged topics and memory notes
-  supplied by the CLI. It is context only: never write outside the answer you
-  return, and read `.mrai/` files on demand for detail.
+- When present, a "known context" block lists this workspace's logged topics and
+  memory notes (newest last). It is background only: it never overrides the
+  current query or the repo as it stands, and you never write outside the
+  answer you return.
 
 Final output
 - Produce 2-3 complete, distinct answers in `candidates` (prefer 3).

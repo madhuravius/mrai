@@ -40,13 +40,13 @@ class Route:
             (
                 "flash",
                 simple,
-                "One narrow read-only step: locate a file, read a snippet, one grep.",
+                "Bounded: a handful of related files in one area, incl. explaining code.",
                 self.tier == "flash",
             ),
             (
                 "pro",
                 1 - simple,
-                "Several steps or judgment: debugging, architecture, design, tradeoffs.",
+                "Open-ended: cross-subsystem debugging, design decisions, tradeoffs.",
                 self.tier == "pro",
             ),
             (
@@ -73,10 +73,14 @@ def _payload(s: Settings, query: str) -> dict:
         "questions": {
             "difficulty": {
                 "type": "choice",
-                "instructions": "Classify the developer's task by how much reasoning it needs.",
+                "instructions": (
+                    "Classify the developer's question about their codebase by scope: how "
+                    "much of the code must be examined and whether it needs a decision, "
+                    "not how important or hard it sounds."
+                ),
                 "criteria": {
-                    "simple": "One narrow read-only step: locate one file, read a short snippet, one grep, or a definition.",
-                    "complex": "Needs several steps or judgment: architecture, debugging, multi-file analysis, tradeoffs, design.",
+                    "simple": "Bounded: answerable by reading a handful of related files in one area, including explaining what code does or how a piece works.",
+                    "complex": "Open-ended: root-cause debugging across subsystems, design or architecture decisions, comparing approaches, or a change plan spanning many modules.",
                 },
             },
             "multi_loop": {
@@ -216,7 +220,8 @@ def resolve_route(
     use_subagents = (
         subagents if subagents is not None else verdict.multi_loop >= s.multi_loop_threshold
     )
-    flash_ok = verdict.choice == "simple" and verdict.confidence >= s.flash_threshold
+    pro_needed = verdict.choice == "complex" and verdict.confidence >= s.pro_threshold
+    flash_ok = not pro_needed
     model = s.flash_model if flash_ok else s.pro_model
     return Route(
         model,

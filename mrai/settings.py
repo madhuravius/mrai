@@ -8,8 +8,11 @@ env-overridable.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
 import os
+import re
+from pathlib import Path
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import (
@@ -35,10 +38,24 @@ def _package_version() -> str:
 VERSION = _package_version()
 
 
+def mrai_home() -> Path:
+    return Path(os.getenv("MRAI_HOME") or Path.home() / ".mrai")
+
+
+def workspace_key(root: Path) -> str:
+    """`<basename-slug>-<sha256(path)[:8]>`; mirrored in ./ai, keep in sync."""
+    path = str(root)
+    name = re.sub(rb"[^a-z0-9]+", b"-", Path(path).name.encode().lower()).decode()
+    name = name.strip("-")[:40].rstrip("-") or "root"
+    return f"{name}-{hashlib.sha256(path.encode()).hexdigest()[:8]}"
+
+
+def default_mrai_dir(root: Path) -> Path:
+    return mrai_home() / "workspaces" / workspace_key(root)
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_prefix="MRAI_", env_file=".env", extra="ignore", yaml_file=".mrai/mrai.yml"
-    )
+    model_config = SettingsConfigDict(env_prefix="MRAI_", env_file=".env", extra="ignore")
 
     # models
     pro_model: str = DEFAULT_PRO_MODEL
@@ -49,7 +66,7 @@ class Settings(BaseSettings):
     model: str | None = None  # MRAI_MODEL: default model override; CLI --model wins
 
     # thresholds
-    flash_threshold: float = 0.6
+    pro_threshold: float = 0.7  # min Jev confidence in "complex" to use pro
     multi_loop_threshold: float = 0.65
     web_screen_threshold: float = 0.6  # web_fetch: Jev URL-ranking keep threshold
 
@@ -59,9 +76,10 @@ class Settings(BaseSettings):
     max_requests: int = 100  # MRAI_MAX_REQUESTS
 
     # session history + long-term memory (CLI-injected; the model never writes these)
-    session_file: str = "session.json"  # MRAI_SESSION_FILE — conversation roll under .mrai/
-    memory_file: str = "memories.md"  # MRAI_MEMORY_FILE — long-term memory notes under .mrai/
-    max_history: int = 20  # MRAI_MAX_HISTORY — last-N messages trimmed from .mrai/session.json
+    session_file: str = "session.json"  # MRAI_SESSION_FILE — conversation roll
+    memory_file: str = "memories.md"  # MRAI_MEMORY_FILE — long-term memory notes
+    routing_log: str = "routing.jsonl"  # MRAI_ROUTING_LOG
+    max_history: int = 20  # MRAI_MAX_HISTORY — last-N messages kept in the roll
 
     # web fetch
     web_budget: int = 3
@@ -74,6 +92,8 @@ class Settings(BaseSettings):
     connect_timeout: float = 3.0  # fail fast on a hung connection
     read_timeout: float = 5.0  # fail fast if the server dribbles bytes
     user_agent: str = f"mrai/{VERSION} (read-only dev agent)"
+    # empty = any public host
+    web_allowed_domains: list[str] = Field(default_factory=list)
 
     provider: str = "openrouter"  # MRAI_PROVIDER: "openrouter" | "openai"
     base_url: str | None = None  # MRAI_BASE_URL: OpenAI-compatible gateway (bifrost, LiteLLM, …)
@@ -100,7 +120,9 @@ class Settings(BaseSettings):
             init_settings,
             env_settings,
             dotenv_settings,
-            YamlConfigSettingsSource(settings_cls),
+            YamlConfigSettingsSource(
+                settings_cls, yaml_file=[mrai_home() / "mrai.yml", Path(".mrai/mrai.yml")]
+            ),
             file_secret_settings,
         )
 

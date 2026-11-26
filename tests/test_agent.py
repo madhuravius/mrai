@@ -44,7 +44,7 @@ RESULT = {
 
 
 def test_model_gateway_when_base_url_set():
-    s = Settings(base_url="http://gw", openrouter_api_key="k")
+    s = Settings(base_url="http://gw.invalid", openrouter_api_key="k")
     assert type(agent_mod._model(s, "k", "some/model")).__name__ == "OpenAIChatModel"
 
 

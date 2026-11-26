@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import os
 import shutil
 import sys
 from collections import Counter
 from collections.abc import AsyncIterable, Sequence
-from contextlib import suppress
+from contextlib import contextmanager, suppress
+from dataclasses import replace
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from time import monotonic
@@ -25,23 +29,56 @@ from pydantic_ai import (
     ThinkingPartDelta,
     UnexpectedModelBehavior,
 )
-from pydantic_ai.exceptions import UsageLimitExceeded
-from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter, ToolCallPart
+from pydantic_ai.exceptions import UsageLimitExceeded, UserError
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelMessagesTypeAdapter,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ToolCallPart,
+    UserPromptPart,
+)
 from pydantic_ai.usage import RunUsage, UsageLimits
 from rich.console import Console, Group
 from rich.live import Live as _Live
-from rich.markdown import Markdown
+from rich.markdown import CodeBlock, Markdown
 from rich.spinner import Spinner
+from rich.syntax import Syntax
 from rich.text import Text
 
 from .agent import Answer, MemoryDeps, build_researcher, build_writers
 from .logbook import Logbook, _atomic_write_text, slugify
 from .router import Route, resolve_route, select_final_answer
-from .settings import UPSTREAM_RETRY_MARKERS, VERSION, Settings, env_deny_patterns
+from .settings import (
+    UPSTREAM_RETRY_MARKERS,
+    VERSION,
+    Settings,
+    default_mrai_dir,
+    env_deny_patterns,
+)
 from .webfetch import WebFetchTool
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 console = Console()
+
+
+class _FlushCodeBlock(CodeBlock):
+    """Code block without rich's padding and wrapping, so copy-paste keeps indentation."""
+
+    def __rich_console__(self, console, options):
+        yield Syntax(
+            str(self.text).rstrip(),
+            self.lexer_name,
+            theme=self.theme,
+            word_wrap=False,
+            padding=0,
+            background_color="default",
+        )
+
+
+class _Markdown(Markdown):
+    elements = {**Markdown.elements, "fence": _FlushCodeBlock, "code_block": _FlushCodeBlock}
 
 
 class ToolCallTimeout(RuntimeError):
@@ -111,7 +148,7 @@ class ToolRunView:
         self._shown = len(self.history)
         return tail
 
-    def snapshot(self) -> Group:
+    def activity(self) -> str:
         now = monotonic()
         parts = []
         for name, start in sorted(self.starts.items(), key=lambda kv: kv[1]):
@@ -120,15 +157,19 @@ class ToolRunView:
             parts.append(f"{name} {secs:.1f}s{flag}")
         if self.thinking:
             parts.append("thinking…")
-        self._spinner.text = " | ".join(parts) or "idle"
+        return " | ".join(parts)
 
-        blocks: list = [*self.history[self._shown : self._shown + _LIVE_WINDOW]]
+    def transcript(self) -> list[Text]:
+        blocks = [*self.history[self._shown : self._shown + _LIVE_WINDOW]]
         if not self._shown:
             blocks = [*self.history[-_LIVE_WINDOW:]]
         if self._thought:
             blocks.append(Text(self._thought, style="dim italic"))
-        blocks.append(self._spinner)
-        return Group(*blocks)
+        return blocks
+
+    def snapshot(self) -> Group:
+        self._spinner.text = self.activity() or "idle"
+        return Group(*self.transcript(), self._spinner)
 
     def timed_out(self) -> list[str]:
         now = monotonic()
@@ -137,6 +178,69 @@ class ToolRunView:
     def fire(self, name: str) -> None:
         self.fired_names.add(name)
         self.fired.set()
+
+
+class RunStatus:
+    """One spinner pinned to the bottom of the terminal for the whole run."""
+
+    def __init__(self) -> None:
+        self.phase = "starting"
+        self.view: ToolRunView | None = None
+        self._started = monotonic()
+        self._spinner = Spinner("dots")
+        self._live = _Live(
+            self,
+            console=console,
+            screen=False,
+            refresh_per_second=8,
+            transient=True,
+            redirect_stdout=False,
+        )
+
+    def __rich__(self) -> Group:
+        text = f"{self.phase} · {monotonic() - self._started:.0f}s"
+        blocks: list = []
+        if self.view is not None:
+            blocks = self.view.transcript()
+            if act := self.view.activity():
+                text += f" · {act}"
+        self._spinner.text = text
+        return Group(*blocks, self._spinner)
+
+    @property
+    def paused(self) -> bool:
+        return not self._live.is_started
+
+    def pause(self) -> None:
+        if not self.paused:
+            self._live.stop()
+
+    def resume(self) -> None:
+        if self.paused:
+            self._live.start()
+
+
+_status: RunStatus | None = None
+
+
+@contextmanager
+def _run_status():
+    global _status
+    if not console.is_terminal or os.getenv("CI"):
+        yield None
+        return
+    _status = RunStatus()
+    _status.resume()
+    try:
+        yield _status
+    finally:
+        _status.pause()
+        _status = None
+
+
+def _set_phase(phase: str) -> None:
+    if _status is not None:
+        _status.phase = phase
 
 
 def _event_kind(view: ToolRunView, event) -> str | None:
@@ -173,9 +277,10 @@ async def _event_handler(
     """Stream thinking text and tool activity to the terminal.
 
     A single loop consumes events via `_event_kind`; only the *rendering*
-    differs: a transient Live bottom line (transcript + spinner) on a real
-    terminal, or plain line-by-line printing headless (`live=False`, pipes/CI)
-    — each with its own watchdog. `redirect_stdout=False` keeps human-facing
+    differs: on a real terminal the transcript renders above the run-wide
+    `RunStatus` spinner; headless (pipes/CI) it prints line by line. Parallel
+    writers (`live=False`) under a status are consumed quietly. Every path
+    runs the watchdog. `redirect_stdout=False` keeps human-facing
     tool prompts (e.g. web_fetch's approval) on the real terminal; while an
     interactive tool is in flight the refresh loop and watchdog are suspended
     so the prompt isn't redrawn-over.
@@ -198,61 +303,37 @@ async def _event_handler(
                     return
             await asyncio.sleep(0.25)
 
-    if not live or not console.is_terminal or os.getenv("CI"):
-        watcher = asyncio.create_task(_watch())
-        try:
-            await _print_plain()
-        finally:
-            watcher.cancel()
-        return
+    async def _consume_quietly() -> None:
+        async for event in stream:
+            _event_kind(view, event)
 
+    status = _status
+    watcher = asyncio.create_task(_watch())
     try:
-        with _Live(
-            view.snapshot(),
-            console=console,
-            screen=False,
-            refresh_per_second=8,
-            transient=True,
-            redirect_stdout=False,
-        ) as lc:
-
-            def _suspend_for_prompt() -> None:
-                """Flush the thinking, exit the overlay, and print the compiled
-                transcript so a human-facing tool prompt lands on a stable
-                terminal instead of fighting the live layer."""
-                with suppress(Exception):
-                    lc.stop()
-                for line in view.new_lines():
-                    console.print(line)
-
-            async def _tick() -> None:
-                while True:
-                    if not view.interactive:
-                        lc.update(view.snapshot(), refresh=True)
-                        for name in view.timed_out():
-                            view.fire(name)
-                            return
-                    await asyncio.sleep(0.25)
-
-            watcher = asyncio.create_task(_tick())
-            try:
-                async for event in stream:
-                    kind = _event_kind(view, event)
-                    if kind == "call" and view.interactive:
-                        _suspend_for_prompt()
-                    elif kind == "result" and not lc.is_started:
-                        lc.start()
-                    elif kind == "thought":
-                        view.add_thought(event.delta.content_delta)
-                    if not view.interactive:
-                        lc.update(view.snapshot(), refresh=True)
-            finally:
-                watcher.cancel()
+        if status is None:
+            await _print_plain()
+        elif not live:
+            await _consume_quietly()
+        else:
+            status.view = view
+            async for event in stream:
+                kind = _event_kind(view, event)
+                if kind == "call" and view.interactive:
+                    status.pause()
+                    for line in view.new_lines():
+                        console.print(line)
+                elif kind == "result" and not view.interactive:
+                    status.resume()
+                elif kind == "thought":
+                    view.add_thought(event.delta.content_delta)
     finally:
-        # transient=True cleared the live layer; print whatever was never
-        # replayed to the terminal plainly (new_lines is idempotent).
-        for line in view.new_lines():
-            console.print(line)
+        watcher.cancel()
+        if status is not None and live:
+            status.view = None
+            if not view.interactive:
+                status.resume()
+            for line in view.new_lines():
+                console.print(line)
 
 
 async def _run_with_watchdog(
@@ -410,6 +491,7 @@ async def _run_pipeline(
     limits = UsageLimits(request_limit=settings.max_requests)
     slow = {"delegate_task": settings.subagent_timeout}
     r_usage = RunUsage()
+    _set_phase("researching")
     research = await _run_limited(
         researcher,
         query,
@@ -424,19 +506,32 @@ async def _run_pipeline(
     evidence = research.all_messages()  # the full tool workflow, verbatim
 
     w_usages = [RunUsage() for _ in writers]
+    done = 0
+    _set_phase(f"writing answers 0/{len(writers)}")
+
+    async def _counted(run):
+        nonlocal done
+        try:
+            return await run
+        finally:
+            done += 1
+            _set_phase(f"writing answers {done}/{len(writers)}")
+
     results = await asyncio.gather(
         *[
-            _run_limited(
-                w,
-                _writer_prompt(query, angle),
-                list(evidence),
-                deps,
-                timeout,
-                u,
-                live=False,  # no Live collision while fanning out
-                watchdog=False,  # tool-less writers: no timer race
-                limits=limits,
-                slow_overrides=slow,
+            _counted(
+                _run_limited(
+                    w,
+                    _writer_prompt(query, angle),
+                    list(evidence),
+                    deps,
+                    timeout,
+                    u,
+                    live=False,
+                    watchdog=False,
+                    limits=limits,
+                    slow_overrides=slow,
+                )
             )
             for w, angle, u in zip(writers, _ANGLES, w_usages, strict=False)
         ],
@@ -445,12 +540,50 @@ async def _run_pipeline(
     return research, list(results), _merge_usage(r_usage, *w_usages)
 
 
-def _write_render(topic: str, markdown: str) -> Path:
-    md = MarkdownIt("gfm-like", {"linkify": True})
+_HLJS = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1"
+_HLJS_CSS_SRI = "sha512-0aPQyyeZrWj9sCA46UlmWgKOP0mUipLQ6OZXu8l4IcAmD2u31EPEy9VcIMvl7SoAaKe8bLXZhYoMaE/in+gcgA=="
+_HLJS_JS_SRI = "sha512-EBLzUL8XLl+va/zAsmXwS7Z2B1F9HUHkZwyS/VKwh3S7T/U0nF4BaU29EP/ZSf6zgiIxYAnKLu6bJ8dqpmX5uw=="
+_RENDER_SCRIPT = """
+hljs.highlightAll();
+document.querySelectorAll('pre').forEach(function(pre){
+  var btn = document.createElement('button');
+  btn.className = 'copy-btn'; btn.textContent = 'Copy';
+  btn.onclick = function(){
+    var code = pre.querySelector('code');
+    navigator.clipboard.writeText((code||pre).textContent).then(function(){
+      btn.textContent = 'Copied!';
+      setTimeout(function(){ btn.textContent = 'Copy'; }, 2000);
+    });
+  };
+  pre.appendChild(btn);
+});
+"""
+
+
+def _render_csp() -> str:
+    """Only our inline script and the pinned CDN files may load; a remote <img> would leak data."""
+    digest = base64.b64encode(hashlib.sha256(_RENDER_SCRIPT.encode()).digest()).decode()
+    return "; ".join(
+        [
+            "default-src 'none'",
+            f"script-src 'sha256-{digest}' {_HLJS}/highlight.min.js",
+            f"style-src 'unsafe-inline' {_HLJS}/styles/",
+            "img-src data:",
+            "base-uri 'none'",
+            "form-action 'none'",
+        ]
+    )
+
+
+def _write_render(mrai_dir: Path, topic: str, markdown: str) -> Path:
+    """HTML copy of the answer; raw HTML in the (possibly steered) model output is escaped."""
+    md = MarkdownIt("gfm-like", {"linkify": True, "html": False})
     body = md.render(markdown)
     html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github.min.css">
+<meta http-equiv="Content-Security-Policy" content="{_render_csp()}">
+<meta name="referrer" content="no-referrer">
+<link rel="stylesheet" href="{_HLJS}/styles/github.min.css" integrity="{_HLJS_CSS_SRI}" crossorigin="anonymous">
 <style>
 body {{ font-family: system-ui; max-width: 72ch; margin: 2rem auto; line-height: 1.6; }}
 pre {{ position: relative; }}
@@ -462,26 +595,10 @@ pre code.hljs {{ padding: 1rem; border-radius: 6px; overflow-x: auto; }}
 }}
 pre:hover .copy-btn, .copy-btn:focus {{ opacity: 1; }}
 </style></head><body>{body}
-<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
-<script>hljs.highlightAll();</script>
-<script>
-(function(){{
-  document.querySelectorAll('pre').forEach(function(pre){{
-    var btn = document.createElement('button');
-    btn.className = 'copy-btn'; btn.textContent = 'Copy';
-    btn.onclick = function(){{
-      var code = pre.querySelector('code');
-      navigator.clipboard.writeText((code||pre).textContent).then(function(){{
-        btn.textContent = 'Copied!';
-        setTimeout(function(){{ btn.textContent = 'Copy'; }}, 2000);
-      }});
-    }};
-    pre.appendChild(btn);
-  }});
-}})();
-</script></body></html>"""
-    path = Path(".mrai/renders") / f"{slugify(topic)}.html"
-    path.parent.mkdir(parents=True, exist_ok=True)
+<script src="{_HLJS}/highlight.min.js" integrity="{_HLJS_JS_SRI}" crossorigin="anonymous"></script>
+<script>{_RENDER_SCRIPT}</script>
+</body></html>"""
+    path = mrai_dir / "renders" / f"{slugify(topic)}.html"
     _atomic_write_text(path=path, text=html)
     return path
 
@@ -493,6 +610,10 @@ def _enter_sandbox(no_web: bool) -> None:
     if os.getenv("MRAI_SANDBOXED"):
         return
     if shutil.which("bwrap") is None:
+        console.print(
+            "[red]--sandbox needs bubblewrap (bwrap), which is not installed.[/red] "
+            "Install it, or pass --no-sandbox to run unsandboxed."
+        )
         raise typer.Exit(1)
     cwd, home = os.getcwd(), os.path.expanduser("~")
     cmd = [
@@ -520,13 +641,13 @@ def _enter_sandbox(no_web: bool) -> None:
     cmd += [
         "--bind",
         mrai_dir,
-        mrai_dir,  # real data + writable
+        mrai_dir,
         "--tmpfs",
-        f"{home}/.cache",  # just needs writable
+        f"{home}/.cache",
     ]
     if no_web:
         cmd += ["--unshare-net"]
-    argv = [a for a in sys.argv if a != "--sandbox"]  # strip to avoid re-entry
+    argv = [a for a in sys.argv if a not in ("--sandbox", "-b")]
     os.execvpe("bwrap", cmd + argv, {**os.environ, "MRAI_SANDBOXED": "1"})
 
 
@@ -539,13 +660,20 @@ def main(
     pro: bool = typer.Option(False, "--pro", "-p", help="force the pro-tier model"),
     subagents: bool = typer.Option(False, "--subagents", "-s", help="enable the explorer subagent"),
     sandbox: bool = typer.Option(
-        True, "--sandbox", "-b", help="enable sandboxing and run natively"
+        True,
+        "--sandbox/--no-sandbox",
+        "-b",
+        help="re-run inside bubblewrap (Linux; a no-op in the Docker image, which is the sandbox)",
     ),
     no_subagents: bool = typer.Option(
         False, "--no-subagents", help="disable the explorer subagent"
     ),
     model: str | None = typer.Option(None, "--model", "-m", help="OpenRouter model id"),
-    mrai_dir: Path = typer.Option(Path.home() / ".mrai", "--dir", help="markdown log directory"),
+    mrai_dir: Path | None = typer.Option(
+        None,
+        "--dir",
+        help="state dir (session, logbook, memories); default: MRAI_DIR, else ~/.mrai/workspaces/<cwd key>",
+    ),
     no_write: bool = typer.Option(False, "--no-write", help="print answer only, do not log"),
     no_web: bool = typer.Option(False, "--no-web", help="disable the web_fetch tool"),
     max_web_fetches: int | None = typer.Option(
@@ -560,7 +688,7 @@ def main(
         help="do not inject long-term memory (logbook index + MRAI_MEMORY_FILE)",
     ),
 ) -> None:
-    """Answer a dev query against the repo, logging to .mrai/*.md. Jev routes model + subagents; web_fetch is Jev-screened and human-approved."""
+    """Answer a dev query against the repo, logging to a per-workspace state dir. Jev routes model + subagents; web_fetch is Jev-screened and human-approved."""
     if version:
         typer.echo(f"mrai {VERSION}")
         raise typer.Exit(0)
@@ -584,8 +712,11 @@ def main(
         console.print(f"[routing] {route.describe()}")
     if route.jev_error:
         console.print(f"[dim]warning: Jev unavailable ({route.jev_error}); routing fell back[/dim]")
-    mrai_dir = Path(os.getenv("MRAI_DIR") or mrai_dir)
+    mrai_dir = resolve_mrai_dir(mrai_dir)
+    console.print(f"[dim]state: {mrai_dir}[/dim]")
     settings = Settings()
+    if not no_write:
+        _log_route(mrai_dir / settings.routing_log, query, route)
     session_path = mrai_dir / settings.session_file
     memory_file = mrai_dir / settings.memory_file
 
@@ -627,80 +758,94 @@ def main(
         console.print(f"[red]model setup failed:[/red] {exc}")
         raise typer.Exit(1) from None
 
-    try:
-        research, results, usage = asyncio.run(
-            _run_pipeline(researcher, writers, query, history or None, deps, settings)
-        )
-    except ToolCallTimeout as exc:
-        console.print(
-            f"[yellow]tool call exceeded {settings.tool_timeout:.0f}s ({exc}); retrying run once[/yellow]"
-        )
+    def run_once():
+        nonlocal history
         try:
-            research, results, usage = asyncio.run(
+            return asyncio.run(
                 _run_pipeline(researcher, writers, query, history or None, deps, settings)
             )
-        except (ToolCallTimeout, UnexpectedModelBehavior, AgentRunError) as exc2:
-            _log_failure(mrai_dir, query, f"retry failed: {_one_line(str(exc2))}", no_write)
-            console.print("[yellow]retry also failed; giving up[/yellow]")
-            raise typer.Exit(1) from None
-    except UnexpectedModelBehavior as exc:
-        _log_failure(
-            mrai_dir,
-            query,
-            f"model gave up on a failing tool call: {_one_line(str(exc))}",
-            no_write,
-        )
-        console.print(
-            f"[yellow]model gave up on a failing tool call:[/yellow] {_one_line(str(exc))}"
-        )
-        raise typer.Exit(1) from None
-    except AgentRunError as exc:
-        if _is_retryable(exc):
+        except UserError as exc:
+            if not history or "workspace" not in str(exc):
+                raise
             console.print(
-                f"[yellow]upstream HTTP 504/529/429 ({_one_line(str(exc))}); retrying run once[/yellow]"
+                f"[yellow]session history belongs to another workspace; starting fresh[/yellow] "
+                f"[dim]({_one_line(str(exc))})[/dim]"
+            )
+            history = []
+            return asyncio.run(_run_pipeline(researcher, writers, query, None, deps, settings))
+
+    with _run_status():
+        try:
+            research, results, usage = run_once()
+        except ToolCallTimeout as exc:
+            console.print(
+                f"[yellow]tool call exceeded {settings.tool_timeout:.0f}s ({exc}); retrying run once[/yellow]"
             )
             try:
-                research, results, usage = asyncio.run(
-                    _run_pipeline(researcher, writers, query, history or None, deps, settings)
-                )
-            except AgentRunError as exc2:
-                _log_failure(
-                    mrai_dir,
-                    query,
-                    f"upstream error, retry failed: {_one_line(str(exc2))}",
-                    no_write,
-                )
-                console.print(f"[red]retry failed:[/red] {_one_line(str(exc2))}")
+                research, results, usage = run_once()
+            except (ToolCallTimeout, UnexpectedModelBehavior, AgentRunError) as exc2:
+                _log_failure(mrai_dir, query, f"retry failed: {_one_line(str(exc2))}", no_write)
+                console.print("[yellow]retry also failed; giving up[/yellow]")
                 raise typer.Exit(1) from None
-        else:
+        except UnexpectedModelBehavior as exc:
             _log_failure(
                 mrai_dir,
                 query,
-                f"run failed: {_one_line(str(exc))}",
+                f"model gave up on a failing tool call: {_one_line(str(exc))}",
                 no_write,
             )
-            console.print(f"[red]run failed:[/red] {_one_line(str(exc))}")
+            console.print(
+                f"[yellow]model gave up on a failing tool call:[/yellow] {_one_line(str(exc))}"
+            )
+            raise typer.Exit(1) from None
+        except AgentRunError as exc:
+            if _is_retryable(exc):
+                console.print(
+                    f"[yellow]upstream HTTP 504/529/429 ({_one_line(str(exc))}); retrying run once[/yellow]"
+                )
+                try:
+                    research, results, usage = run_once()
+                except AgentRunError as exc2:
+                    _log_failure(
+                        mrai_dir,
+                        query,
+                        f"upstream error, retry failed: {_one_line(str(exc2))}",
+                        no_write,
+                    )
+                    console.print(f"[red]retry failed:[/red] {_one_line(str(exc2))}")
+                    raise typer.Exit(1) from None
+            else:
+                _log_failure(
+                    mrai_dir,
+                    query,
+                    f"run failed: {_one_line(str(exc))}",
+                    no_write,
+                )
+                console.print(f"[red]run failed:[/red] {_one_line(str(exc))}")
+                raise typer.Exit(1) from None
+
+        ok = [r for r in results if not isinstance(r, BaseException)]
+        for i, r in enumerate(results, 1):
+            if isinstance(r, BaseException):
+                console.print(f"[yellow]candidate {i} failed:[/yellow] {_one_line(str(r))}")
+        if not ok:
+            first = next(r for r in results if isinstance(r, BaseException))
+            _log_failure(mrai_dir, query, f"all candidates failed: {first}", no_write)
+            console.print("[red]all candidates failed; nothing to select[/red]")
             raise typer.Exit(1) from None
 
-    ok = [r for r in results if not isinstance(r, BaseException)]
-    for i, r in enumerate(results, 1):
-        if isinstance(r, BaseException):
-            console.print(f"[yellow]candidate {i} failed:[/yellow] {_one_line(str(r))}")
-    if not ok:
-        console.print("[red]all candidates failed; nothing to select[/red]")
-        raise typer.Exit(1) from None
-
-    candidates: list[Answer] = [r.output for r in ok]
-    idx = pick_cost = None
-    scores: list[float] = []
-    pick_err = "fewer than two candidates; nothing to choose between"
-    if len(candidates) >= 2:
-        idx, scores, pick_cost, pick_err = select_final_answer(
-            query,
-            [(c.topic, c.title, c.markdown) for c in candidates],
-            settings.openrouter_api_key,
-            settings,
-        )
+        candidates: list[Answer] = [r.output for r in ok]
+        idx = pick_cost = None
+        scores: list[float] = []
+        pick_err = "fewer than two candidates; nothing to choose between"
+        if len(candidates) >= 2:
+            _set_phase("choosing the best answer")
+            idx, scores, pick_cost, pick_err = select_final_answer(
+                query,
+                [(c.topic, c.title, c.markdown) for c in candidates],
+                settings.openrouter_api_key,
+                settings,
+            )
     if idx is None:
         console.print(
             f"[dim]warning: Jev final selection unavailable ({pick_err}); using first candidate[/dim]"
@@ -717,7 +862,7 @@ def main(
     if not no_write:
         _save_history(session_path, research.all_messages(), settings.max_history)
     console.print()
-    console.print(Markdown(ans.markdown))
+    console.print(_Markdown(ans.markdown))
     console.print()
     _print_footer(
         research,
@@ -736,15 +881,47 @@ def main(
 
 
 def _trim_history(messages: Sequence[ModelMessage], max_history: int) -> list[ModelMessage]:
-    """Copy + bound the roll to the last-N messages (never mutates the live list)."""
-    messages = list(messages)
-    if max_history > 0 and len(messages) > max_history:
-        return messages[-max_history:]
-    return messages
+    """Keep the last-N messages as whole turns (prompt + final reply).
+
+    A plain count cut can split a tool call from its result, which providers reject.
+    """
+    turns: list[list[ModelMessage]] = []
+    for msg in messages:
+        if isinstance(msg, ModelRequest):
+            prompts = [p for p in msg.parts if isinstance(p, UserPromptPart)]
+            if prompts:
+                turns.append([replace(msg, parts=prompts)])
+        elif isinstance(msg, ModelResponse) and turns:
+            texts = [p for p in msg.parts if isinstance(p, TextPart) and p.content.strip()]
+            if texts:
+                turns[-1][1:] = [replace(msg, parts=texts)]
+    complete = [t for t in turns if len(t) == 2]
+    if max_history > 0:
+        complete = complete[-(max_history // 2) :] if max_history >= 2 else []
+    return [m for t in complete for m in t]
+
+
+def _host_path(path: Path, mrai_dir: Path) -> Path:
+    """Map a state-dir path to its host location when running in the ./ai container."""
+    host = os.getenv("MRAI_HOST_DIR")
+    if not host:
+        return path
+    with suppress(ValueError):
+        return Path(host) / path.relative_to(mrai_dir.resolve())
+    return path
+
+
+def resolve_mrai_dir(flag: Path | None, cwd: Path | None = None) -> Path:
+    """--dir > MRAI_DIR > ~/.mrai/workspaces/<key of cwd>."""
+    if flag is not None:
+        return flag
+    if env := os.getenv("MRAI_DIR"):
+        return Path(env)
+    return default_mrai_dir(cwd or Path.cwd())
 
 
 def _load_history(path: Path, max_history: int) -> list[ModelMessage]:
-    """Read .mrai/session.json -> last-N ModelMessages; [] on missing/invalid data."""
+    """Read the session roll -> last-N ModelMessages; [] on missing/invalid data."""
     if not path.is_file():
         return []
     try:
@@ -817,9 +994,31 @@ def _log_topic(
         path, created = lb.append(topic, title, query, markdown)
         lb.remember(memory_file, topic, title)
         bits.append(f"[bold green]{'new' if created else 'appended'}[/bold green] {path}")
-        html_path = _write_render(topic, markdown)
-        console.print(f"[dim]render:[/dim] file://{html_path.resolve()}")
+        html_path = _write_render(mrai_dir, topic, markdown)
+        console.print(f"[dim]render:[/dim] file://{_host_path(html_path.resolve(), mrai_dir)}")
     console.print(" · ".join(bits))
+
+
+def _log_route(path: Path, query: str, route: Route) -> None:
+    """Append the routing decision as one JSON line; never breaks a run."""
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "query": query,
+        "tier": route.tier or None,
+        "model": route.model,
+        "source": route.source,
+        "choice": route.choice,
+        "confidence": route.confidence if route.source == "jev" else None,
+        "multi_loop": route.multi_loop,
+        "subagents": route.subagents,
+        "jev_error": route.jev_error,
+    }
+    with suppress(OSError):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
 
 
 def _log_failure(

@@ -57,8 +57,9 @@ def test_forced_subagents_override(monkeypatch):
     "choice,confidence,multi_loop,expected,subagents",
     [
         ("simple", 0.95, 0.2, FLASH_MODEL, False),  # simple + confident → flash
-        ("simple", 0.5, 0.2, PRO_MODEL, False),  # shaky "simple" → pro
-        ("complex", 0.9, 0.3, PRO_MODEL, False),
+        ("simple", 0.5, 0.2, FLASH_MODEL, False),
+        ("complex", 0.6, 0.2, FLASH_MODEL, False),
+        ("complex", 0.7, 0.3, PRO_MODEL, False),
         ("complex", 0.9, 0.9, PRO_MODEL, True),  # multi-loop → subagents on
     ],
 )
@@ -91,7 +92,7 @@ def test_jev_summary_marks_chosen_rows(monkeypatch):
     by = {label: (score, chosen) for label, score, _blurb, chosen in rows}
     assert set(by) == {"flash", "pro", "explorer subagent"}
     assert r.choice == "simple"
-    # simple + confident (>= 0.6) -> flash, multi-loop -> subagents: both chosen
+    # simple -> flash, multi-loop -> subagents: both chosen
     assert [label for label, score, _blurb, chosen in rows if chosen] == [
         "flash",
         "explorer subagent",
@@ -152,3 +153,11 @@ def test_select_final_answer_out_of_range(monkeypatch):
     idx, scores, cost, err = router.select_final_answer("q", CANDIDATES)
     assert idx is None and scores == [0.8, 0.9, 0.7] and cost == 0.00002
     assert err is not None and "out-of-range" in err
+
+
+def test_payload_classifies_by_scope_not_difficulty():
+    from mrai.settings import Settings
+
+    crit = router._payload(Settings(), "q")["questions"]["difficulty"]["criteria"]
+    assert "explaining what code does" in crit["simple"]
+    assert "debugging" in crit["complex"] and "debugging" not in crit["simple"]

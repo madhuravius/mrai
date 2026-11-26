@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Usage: ai [prompt...]
+
+pwd=$(pwd -P)
+
+# keep in sync with mrai.settings.workspace_key
+sha256() { if command -v sha256sum &>/dev/null; then sha256sum; else shasum -a 256; fi; }
+name=$(basename "$pwd" | LC_ALL=C tr 'A-Z' 'a-z' | LC_ALL=C sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')
+name=$(printf '%s' "${name:0:40}" | sed -E 's/-+$//')
+key="${name:-root}-$(printf '%s' "$pwd" | sha256 | cut -c1-8)"
+
+mrai_home="${MRAI_HOME:-$HOME/.mrai}"
+data_dir="$mrai_home/workspaces/$key"
+# outside data_dir: the container can write there
+hist_file="$mrai_home/history/$key"
+
+remember() {
+    local line tmp
+    line=$(printf '%s' "$1" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+    [[ -z "$line" ]] && return 0
+    (
+        umask 077
+        mkdir -p "$(dirname "$hist_file")"
+        touch "$hist_file"
+        tmp="$hist_file.$$"
+        { grep -vxF -- "$line" "$hist_file" || true; printf '%s\n' "$line"; } | tail -n 1000 >"$tmp"
+        mv "$tmp" "$hist_file"
+    )
+}
+
+compose_long() {
+    if ! command -v gum &>/dev/null; then
+        echo "gum is required for multi-line prompts — https://github.com/charmbracelet/gum#installation" >&2
+        exit 1
+    fi
+    gum write \
+        --header "What do you need to know about this codebase? (Enter sends · Ctrl-J new line · Esc cancels)" \
+        --placeholder "e.g. Why does CI fail on ARM? How is auth wired?" \
+        --height 6
+}
+
+compose() {
+    local line
+    unset HISTFILE
+    history -c
+    [[ -f "$hist_file" ]] && history -r "$hist_file"
+    if command -v gum &>/dev/null; then
+        gum style --foreground 240 "What do you need to know about this codebase?  (↑/↓ history · Ctrl-R search · empty Enter: multi-line)" >&2
+    else
+        echo "What do you need to know about this codebase?  (↑/↓ history · Ctrl-R search)" >&2
+    fi
+    IFS= read -e -r -p "> " line || exit 0
+    if [[ -z "${line//[[:space:]]/}" ]] && command -v gum &>/dev/null; then
+        compose_long
+    else
+        printf '%s' "$line"
+    fi
+}
+
+if [[ $# -gt 0 ]]; then
+    prompt="$*"
+else
+    prompt="$(compose)"
+fi
+
+prompt=$(printf '%s\n' "${prompt}" | sed -n '/[^[:space:]]/p')
+[[ -z "${prompt}" ]] && exit 0
+remember "$prompt"
+
+# docker would create a missing bind source as root
+mkdir -p "$data_dir"
+
+mounts=(-v "$data_dir:/tmp/mrai-data" -v "$pwd:$pwd:ro")
+# Shared config is optional; only mount it if it is a real file (a missing
+# source would otherwise be created by docker as a root-owned directory).
+if [[ -f "$mrai_home/mrai.yml" ]]; then
+    mounts+=(-v "$mrai_home/mrai.yml:/tmp/mrai-home/mrai.yml:ro")
+fi
+
+docker run --rm -it \
+	--user "$(id -u):$(id -g)" \
+	--tmpfs /tmp \
+	--tmpfs /home/nonroot/.cache \
+	--cap-drop ALL \
+	--security-opt=no-new-privileges \
+	"${mounts[@]}" \
+	-w "$pwd" \
+	-e MRAI_API_KEY \
+	-e MRAI_OPENROUTER_API_KEY \
+	-e OPENROUTER_API_KEY \
+	-e OPENAI_API_KEY \
+	-e MRAI_DIR=/tmp/mrai-data \
+	-e MRAI_HOST_DIR="$data_dir" \
+	-e MRAI_HOME=/tmp/mrai-home \
+	-e COLUMNS \
+	-e TERM \
+	-e COLORTERM \
+	"${MRAI_IMAGE:-ghcr.io/madhuravius/mrai}" "$prompt"

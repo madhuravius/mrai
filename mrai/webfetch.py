@@ -13,7 +13,9 @@ from dataclasses import dataclass
 
 import httpx
 from rich.console import Console
+from rich.markup import escape
 
+from .leaks import find_secret
 from .settings import Settings
 
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -21,6 +23,11 @@ _TAG_RE = re.compile(r"<[^>]+>")
 _REFUSED = "WEB_FETCH REFUSED: no valid public http(s) URL supplied."
 _DISABLED = "WEB_FETCH DISABLED: denied 3 times this run. Stop calling web_fetch; use the local codebase only."
 _UNAVAILABLE = "WEB_FETCH UNAVAILABLE: Jev could not be reached; nothing was fetched. Retry with different URLs or proceed locally."
+_SECRET = (
+    "WEB_FETCH REFUSED: the request carries what looks like a credential ({what}). "
+    "Never put repo contents, keys or tokens in a URL or payload. Do not retry this request."
+)
+_LONG_QUERY = 100
 _NOISE = "WEB_FETCH NOISE: Jev judged none of the candidates worth fetching. Propose different URLs or another angle."
 
 # Failure replies are prefixed with one of these so the tool can tell an
@@ -68,12 +75,7 @@ def _net_error_msg(url: str, exc: BaseException) -> str:
 
 
 def _resolve_and_check(host: str) -> str | None:
-    """Resolve *host* and return an error if any resolved IP is non-public.
-
-    Returns None when all addresses are public, or when resolution fails
-    (fail-open: DNS blips must not block legitimate URLs, and
-    `_guard_redirect` re-checks right before connect anyway).
-    """
+    """Fails open on DNS errors: `_guard_redirect` re-checks before connect."""
     try:
         infos = socket.getaddrinfo(host, None, 0, socket.SOCK_STREAM)
     except socket.gaierror:
@@ -101,9 +103,16 @@ def _validate_url(url: str) -> str | None:
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
-        return _resolve_and_check(host)  # <-- hostname now checked
+        return _resolve_and_check(host)
     if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
         return f"refusing non-public address {host!r}"
+    return None
+
+
+def _query_warning(url: str) -> str | None:
+    query = urllib.parse.urlparse(url).query
+    if len(query) > _LONG_QUERY:
+        return f"query string is {len(query)} chars: check it carries nothing from your repo"
     return None
 
 
@@ -172,8 +181,6 @@ def jev_screen_urls(
 
 
 class WebFetchTool:
-    """Jev-screened, human-approved web fetch, safe under the read-only sandbox."""
-
     def __init__(
         self,
         *,
@@ -209,6 +216,7 @@ class WebFetchTool:
             timeout=self._timeout,
             follow_redirects=True,
             event_hooks={"request": [self._guard_redirect]},
+            transport=httpx.HTTPTransport(retries=2),
         )
         self._budget = s.web_budget if budget is None else budget
         self._max = s.max_attempts if max_attempts is None else max_attempts
@@ -217,6 +225,8 @@ class WebFetchTool:
         self._max_chars = s.max_chars
         self._threshold = s.web_screen_threshold
         self._user_agent = s.user_agent
+        self._allowed = tuple(d.lower().strip(".") for d in s.web_allowed_domains)
+        self._known_secrets = (s.openrouter_api_key,)
         self._lock = threading.Lock()  # serialize terminal prompts when invoked in parallel
         self.denials = 0
         self.fetched = 0
@@ -228,13 +238,19 @@ class WebFetchTool:
         self,
         urls: list[str],
         reason: str,
-        method: str = "GET",
         payload: str | None = None,
     ) -> str:
         """Fetch after Jev ranks the candidates and the developer approves the exact request."""
-        ok = [u for u in urls if _validate_url(u) is None]
-        if not ok or self.extinguished:
-            return _REFUSED if not ok else _DISABLED
+        if self.extinguished:
+            return _DISABLED
+        if leak := find_secret(payload, self._known_secrets) or next(
+            (w for u in urls if (w := find_secret(u, self._known_secrets))), None
+        ):
+            return _SECRET.format(what=leak)
+        ok = [u for u in urls if self._refusal(u) is None]
+        if not ok:
+            reasons = "; ".join(sorted({r for u in urls if (r := self._refusal(u))}))
+            return f"{_REFUSED} ({reasons})" if reasons else _REFUSED
         with self._lock:
             if self.fetched >= self._budget:
                 return f"WEB_FETCH BUDGET: {self._budget} approved fetch(es) used this run. Do not ask again."
@@ -248,7 +264,7 @@ class WebFetchTool:
             keepers = [x for x in scored if x.score >= self._threshold][: self._max_recommended]
             if not keepers:
                 return _NOISE
-            chosen = self._pick(keepers, method, payload, reason)
+            chosen = self._pick(keepers, payload, reason)
             if isinstance(chosen, _DenyAll):
                 return self._deny(force=True)
             if not chosen:
@@ -256,7 +272,7 @@ class WebFetchTool:
             self.denials = 0
             remaining = self._budget - self.fetched
             chosen = [x.url for x in keepers if x.url in chosen][:remaining]
-            results = [self._fetch(method, url, payload) for url in chosen]
+            results = [self._fetch(url, payload) for url in chosen]
             if results and all(r.startswith(_FAILURE_PREFIXES) for r in results):
                 self.network_failures += 1
                 if self.network_failures >= self._max:
@@ -266,11 +282,11 @@ class WebFetchTool:
                 self.network_failures = 0
             return "\n\n".join(results) or "WEB_FETCH: nothing fetched."
 
-    def _pick(self, keepers, method, payload, reason) -> list[str] | _DenyAll:
+    def _pick(self, keepers, payload, reason) -> list[str] | _DenyAll:
         if self._approve:
-            meta = {"method": method.upper(), "payload": payload, "reason": reason}
+            meta = {"method": "GET", "payload": payload, "reason": reason}
             return [u for u in self._approve(list(keepers), meta) if u in {x.url for x in keepers}]
-        return self._terminal_prompt(keepers, method, payload, reason)
+        return self._terminal_prompt(keepers, payload, reason)
 
     def _deny(self, force: bool = False) -> str:
         self.denials += 1
@@ -291,17 +307,19 @@ class WebFetchTool:
         for i, x in enumerate(scored, 1):
             mark = "[green]✓ keep[/green]" if x.score >= self._threshold else "[red]✗ drop[/red]"
             top = " [bold][top pick][/bold]" if i == 1 and x.score >= self._threshold else ""
-            c.print(f"  {mark} {x.url} [dim](Jev {x.score:.2f})[/dim]{top}")
+            c.print(f"  {mark} {escape(x.url)} [dim](Jev {x.score:.2f})[/dim]{top}")
 
-    def _terminal_prompt(self, keepers, method, payload, reason) -> list[str] | _DenyAll:
+    def _terminal_prompt(self, keepers, payload, reason) -> list[str] | _DenyAll:
         c = Console()
         c.print(
             f"[yellow]web_fetch review[/yellow] (denials {self.denials}/{self._max} · fetched {self.fetched}/{self._budget})"
         )
         for i, x in enumerate(keepers, 1):
             top = " · top pick" if i == 1 else ""
-            c.print(f"  [bold]{i}.[/bold] {x.url} [dim](Jev {x.score:.2f}{top})[/dim]")
-        c.print(f"  method={method.upper()} payload={payload or '(none)'}\n  reason: {reason}")
+            c.print(f"  [bold]{i}.[/bold] {escape(x.url)} [dim](Jev {x.score:.2f}{top})[/dim]")
+            if warning := _query_warning(x.url):
+                c.print(f"     [red]⚠ {warning}[/red]")
+        c.print(f"  method=GET payload={escape(payload or '(none)')}\n  reason: {escape(reason)}")
         try:
             a = (
                 input("Approve which URL(s)? (e.g. 1,2 — Enter=none, 'd'=deny all) ")
@@ -320,16 +338,24 @@ class WebFetchTool:
 
     def _guard_redirect(self, req: httpx.Request) -> None:
         """Reject any hop (incl. redirect targets) to a non-public URL."""
-        err = _validate_url(str(req.url))
+        err = self._refusal(str(req.url))
         if err:
             raise httpx.HTTPError(err)
 
-    def _fetch(self, method: str, url: str, payload: str | None) -> str:
+    def _refusal(self, url: str) -> str | None:
+        if err := _validate_url(url):
+            return err
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+        if self._allowed and not any(host == d or host.endswith("." + d) for d in self._allowed):
+            return f"{host!r} is not in web_allowed_domains"
+        return None
+
+    def _fetch(self, url: str, payload: str | None) -> str:
         self.fetched_urls.append(url)
         self.fetched += 1
         try:
             with self._client.stream(
-                (method or "GET").upper(),
+                "GET",
                 url,
                 headers={"User-Agent": self._user_agent},
                 content=payload or None,

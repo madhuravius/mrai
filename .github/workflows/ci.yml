@@ -12,11 +12,11 @@ jobs:
   lint-and-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+      - uses: astral-sh/setup-uv@v10.4.0
         with:
           python-version: "3.14"
           enable-cache: true
@@ -27,18 +27,18 @@ jobs:
   container:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
-      - uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+      - uses: hadolint/hadolint-action@v3.5.0
         with:
           failure-threshold: warning
           ignore: DL3018 # apk versions churn; the base image is digest-pinned instead
 
       - run: make test-container
 
-      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      - uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ghcr.io/madhuravius/mrai
           exit-code: "1"
@@ -49,8 +49,8 @@ jobs:
   verify-lockfile:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
-      - uses: github/gh-actions-lock@5fa07d19c267d19e29f4341f10fdf7f516375038 # verify/v0.5.1
+      - uses: github/gh-actions-lock@verify/v0.5.1

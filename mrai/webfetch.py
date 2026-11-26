@@ -163,7 +163,7 @@ def jev_screen_urls(
     try:
         resp = httpx.post(
             s.decisions_url,
-            headers={"Authorization": f"Bearer {key or s.openrouter_api_key}"},
+            headers={"Authorization": f"Bearer {key or s.jev_api_key}"},
             json={"model": s.jev_model, "state": {"reason": reason}, "questions": questions},
             timeout=s.timeout,
         )
@@ -226,7 +226,7 @@ class WebFetchTool:
         self._threshold = s.web_screen_threshold
         self._user_agent = s.user_agent
         self._allowed = tuple(d.lower().strip(".") for d in s.web_allowed_domains)
-        self._known_secrets = (s.openrouter_api_key,)
+        self._known_secrets = (s.openrouter_api_key, s.jev_api_key)
         self._lock = threading.Lock()  # serialize terminal prompts when invoked in parallel
         self.denials = 0
         self.fetched = 0

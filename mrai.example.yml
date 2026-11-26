@@ -1,9 +1,27 @@
-# .mrai/mrai.yaml — keys are plain field names, NOT env-prefixed
-provider: openai
-base_url: https://openrouter.ai/api/v1
+# ~/.mrai/mrai.yml or .mrai/mrai.yml — plain field names, NOT env-prefixed.
+# The active profile (MRAI_PROFILE / --profile, else `profile:`) overlays the top level.
+profile: openrouter
 decisions_url: https://openrouter.ai/api/alpha/decisions
-pro_model: openai/gpt-6-luna
-flash_model: z-ai/glm-5.3-flash
-subagent_model: z-ai/glm-5.3-flash
-jev_model: perplexity/pplx-decider-v1.2
-route_enabled: true
+jev_model: typesafe/jev-1.14
+
+profiles:
+  openrouter:
+    provider: openrouter
+    pro_model: deepseek/deepseek-v4-pro
+    flash_model: deepseek/deepseek-v4.1-flash
+    subagent_model: deepseek/deepseek-v4.1-flash
+
+  anthropic:
+    provider: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+    jev_api_key_env: OPENROUTER_API_KEY  # Jev stays on OpenRouter
+    pro_model: claude-opus-5-5
+    flash_model: claude-haiku-5-5
+    subagent_model: claude-haiku-5-5
+
+  gateway:
+    provider: openai
+    base_url: https://my-gateway.example/v1
+    route_enabled: false
+    pro_model: openai/gpt-6-luna
+    flash_model: z-ai/glm-5.3-flash

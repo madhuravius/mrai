@@ -14,7 +14,8 @@ import os
 import re
 from pathlib import Path
 
-from pydantic import AliasChoices, Field
+from dotenv import dotenv_values
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -52,6 +53,25 @@ def workspace_key(root: Path) -> str:
 
 def default_mrai_dir(root: Path) -> Path:
     return mrai_home() / "workspaces" / workspace_key(root)
+
+
+def _env(name: str) -> str | None:
+    return os.getenv(name) or dotenv_values(".env").get(name)
+
+
+class _ProfileYamlSource(YamlConfigSettingsSource):
+    """mrai.yml, with the active entry of `profiles:` laid over the top-level values."""
+
+    def _read_files(self, *args, **kwargs) -> dict:
+        data = dict(super()._read_files(*args, **kwargs) or {})
+        profiles = data.pop("profiles", None) or {}
+        name = os.getenv("MRAI_PROFILE") or data.get("profile")
+        if not name:
+            return data
+        if name not in profiles:
+            defined = ", ".join(profiles) or "none"
+            raise ValueError(f"unknown mrai profile {name!r} (mrai.yml defines: {defined})")
+        return {**data, **profiles[name], "profile": name}
 
 
 class Settings(BaseSettings):
@@ -95,9 +115,14 @@ class Settings(BaseSettings):
     # empty = any public host
     web_allowed_domains: list[str] = Field(default_factory=list)
 
-    provider: str = "openrouter"  # MRAI_PROVIDER: "openrouter" | "openai"
-    base_url: str | None = None  # MRAI_BASE_URL: OpenAI-compatible gateway (bifrost, LiteLLM, …)
+    profile: str | None = (
+        None  # MRAI_PROFILE / --profile: picks an entry of `profiles:` in mrai.yml
+    )
+    provider: str = "openrouter"  # "openrouter" | "openai" (compatible gateway) | "anthropic"
+    base_url: str | None = None  # gateway URL; for anthropic, overrides the default endpoint
     route_enabled: bool = True  # MRAI_ROUTE_ENABLED: False skips Jev routing
+    api_key_env: str | None = None  # env var holding the model key, e.g. ANTHROPIC_API_KEY
+    jev_api_key_env: str | None = None  # env var holding Jev's OpenRouter key; default: model key
 
     # secrets
     openrouter_api_key: str | None = Field(
@@ -106,6 +131,17 @@ class Settings(BaseSettings):
             "MRAI_API_KEY", "MRAI_OPENROUTER_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"
         ),
     )
+
+    @model_validator(mode="after")
+    def _key_from_named_env(self) -> Settings:
+        if self.api_key_env:
+            self.openrouter_api_key = _env(self.api_key_env)
+        return self
+
+    @property
+    def jev_api_key(self) -> str | None:
+        """Jev (routing, URL screening, picking) is OpenRouter-only, whatever the model provider."""
+        return _env(self.jev_api_key_env) if self.jev_api_key_env else self.openrouter_api_key
 
     @classmethod
     def settings_customise_sources(
@@ -120,7 +156,7 @@ class Settings(BaseSettings):
             init_settings,
             env_settings,
             dotenv_settings,
-            YamlConfigSettingsSource(
+            _ProfileYamlSource(
                 settings_cls, yaml_file=[mrai_home() / "mrai.yml", Path(".mrai/mrai.yml")]
             ),
             file_secret_settings,

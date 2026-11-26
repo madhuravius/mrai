@@ -78,6 +78,67 @@ compose() {
     printf '%s' "$text"
 }
 
+# Update reminder: daily background tag lookup; MRAI_NO_UPDATE_CHECK=1 disables.
+image="${MRAI_IMAGE:-ghcr.io/madhuravius/mrai}"
+update_cache="$mrai_home/update-check"
+
+newest_tag() {
+    awk -F'[v.]' '/^v[0-9]+\.[0-9]+\.[0-9]+$/ {
+        k = sprintf("%09d%09d%09d", $2, $3, $4); if (k > m) { m = k; t = $0 }
+    } END { if (t) print t }'
+}
+
+version_lt() {
+    local a b i
+    IFS=. read -r -a a <<<"${1#v}"
+    IFS=. read -r -a b <<<"${2#v}"
+    for i in 0 1 2; do
+        ((10#${a[i]:-0} < 10#${b[i]:-0})) && return 0
+        ((10#${a[i]:-0} > 10#${b[i]:-0})) && return 1
+    done
+    return 1
+}
+
+refresh_update_cache() {
+    local now last
+    now=$(date +%s)
+    last=$(cut -d' ' -f1 "$update_cache" 2>/dev/null || echo 0)
+    ((now - ${last:-0} < 86400)) && return 0
+    last=$(cat "$update_cache.attempt" 2>/dev/null || echo 0)
+    ((now - ${last:-0} < 3600)) && return 0
+    mkdir -p "$mrai_home"
+    printf '%s\n' "$now" >"$update_cache.attempt"
+    (
+        latest=$(GIT_TERMINAL_PROMPT=0 git ls-remote --tags --refs \
+            "${MRAI_REPO:-https://github.com/madhuravius/mrai}" 2>/dev/null |
+            sed -n 's|.*refs/tags/||p' | newest_tag)
+        [[ -n "$latest" ]] || exit 0
+        printf '%s %s\n' "$(date +%s)" "$latest" >"$update_cache.$$"
+        mv "$update_cache.$$" "$update_cache"
+    ) </dev/null &>/dev/null &
+    disown 2>/dev/null || true
+}
+
+warn_if_outdated() {
+    [[ -z "${MRAI_NO_UPDATE_CHECK:-}" && -t 2 ]] || return 0
+    command -v git &>/dev/null && refresh_update_cache
+    local latest installed msg
+    latest=$(cut -d' ' -f2 "$update_cache" 2>/dev/null) || return 0
+    installed=$(docker image inspect "$image" \
+        --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' 2>/dev/null)
+    installed="${installed%%-*}"
+    [[ "$installed" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && -n "$latest" ]] || return 0
+    version_lt "$installed" "$latest" || return 0
+    msg="⚠ mrai $latest is available (you have $installed). Update: git pull && make install"
+    if command -v gum &>/dev/null; then
+        gum style --foreground 214 "$msg" >&2
+    else
+        printf '\e[33m%s\e[0m\n' "$msg" >&2
+    fi
+}
+
+warn_if_outdated
+
 if [[ $# -gt 0 ]]; then
     prompt="$*"
 else
@@ -119,6 +180,8 @@ docker run --rm -it \
 	-e MRAI_OPENROUTER_API_KEY \
 	-e OPENROUTER_API_KEY \
 	-e OPENAI_API_KEY \
+	-e ANTHROPIC_API_KEY \
+	-e MRAI_PROFILE \
 	-e MRAI_DIR="$ws_root/$key" \
 	-e MRAI_HOST_DIR="$data_dir" \
 	-e MRAI_HOST_HOME="$mrai_home" \
@@ -126,4 +189,4 @@ docker run --rm -it \
 	-e COLUMNS \
 	-e TERM \
 	-e COLORTERM \
-	"${MRAI_IMAGE:-ghcr.io/madhuravius/mrai}" "$prompt"
+	"$image" "$prompt"

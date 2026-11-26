@@ -180,6 +180,7 @@ def test_routing_decision_is_logged(pipeline, cli_hermetic, monkeypatch):
     rec = json.loads(lines[-1])
     assert rec["query"] == "hello" and rec["source"] == "fallback" and rec["tier"] == "pro"
     assert rec["jev_error"]
+    assert (cli_hermetic / ".mrai" / "routing.jsonl").stat().st_mode & 0o777 == 0o600
 
 
 def test_no_write_skips_routing_log(pipeline, cli_hermetic):

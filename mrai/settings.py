@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     multi_loop_threshold: float = 0.65
     web_screen_threshold: float = 0.6  # web_fetch: Jev URL-ranking keep threshold
 
-    # CLI tool watchdog: per-tool-call budget; the run is cancelled and retried once
+    # per-tool-call budget: a slow tool becomes a retry prompt to the model (2x is the hard backstop)
     tool_timeout: float = 30.0  # MRAI_TOOL_TIMEOUT
     subagent_timeout: float = 120.0  # MRAI_SUBAGENT_TIMEOUT
     max_requests: int = 100  # MRAI_MAX_REQUESTS

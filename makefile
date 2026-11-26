@@ -14,7 +14,7 @@ help:
 sync: ## uv sync
 	$(UV) sync
 
-install: ## install the ./ai wrapper to ~/.local/bin
+install: docker-build ## build the image and install the ./ai wrapper to ~/.local/bin
 	@mkdir -p ~/.local/bin
 	@install -m 755 ai ~/.local/bin/ai
 	@echo "ok  ~/.local/bin/ai"

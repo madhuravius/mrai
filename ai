@@ -1,22 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: ai [prompt...]   (no args: compose the prompt in gum)
-if [[ $# -gt 0 ]]; then
-    prompt="$*"
-else
-    if ! command -v gum &>/dev/null; then
-        echo "gum is required — https://github.com/charmbracelet/gum#installation"
-        exit 1
-    fi
-    prompt="$(gum write \
-        --header "What do you need to know about this codebase?" \
-        --placeholder "e.g. Why does CI fail on ARM? How is auth wired?" \
-        --height 6)"
-fi
-
-prompt=$(printf '%s\n' "${prompt}" | sed -n '/[^[:space:]]/p')
-[[ -z "${prompt}" ]] && exit 0
+# Usage: ai [prompt...]
+#   No args: type the prompt at a readline prompt. Up/Down step through this
+#   workspace's past prompts, Ctrl-R searches them; Enter on an empty line opens
+#   gum for a long multi-line prompt instead.
 
 # Physical path: matches Path.cwd() inside the container, so the workspace id
 # (local:<path>) and the state-dir key below agree with native `mrai` runs.
@@ -30,6 +18,64 @@ key="${name:-root}-$(printf '%s' "$pwd" | sha256 | cut -c1-8)"
 
 mrai_home="${MRAI_HOME:-$HOME/.mrai}"
 data_dir="$mrai_home/workspaces/$key"
+# Kept outside data_dir: that dir is mounted writable into the container, and
+# nothing in there should be able to put words in your next prompt.
+hist_file="$mrai_home/history/$key"
+
+# History stores one prompt per line (multi-line prompts are joined with spaces).
+remember() {
+    local line tmp
+    line=$(printf '%s' "$1" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+    [[ -z "$line" ]] && return 0
+    (
+        umask 077                       # your prompts are nobody else's business
+        mkdir -p "$(dirname "$hist_file")"
+        touch "$hist_file"
+        tmp="$hist_file.$$"
+        { grep -vxF -- "$line" "$hist_file" || true; printf '%s\n' "$line"; } | tail -n 1000 >"$tmp"
+        mv "$tmp" "$hist_file"
+    )
+}
+
+compose_long() {
+    if ! command -v gum &>/dev/null; then
+        echo "gum is required for multi-line prompts — https://github.com/charmbracelet/gum#installation" >&2
+        exit 1
+    fi
+    gum write \
+        --header "What do you need to know about this codebase? (Enter sends · Ctrl-J new line · Esc cancels)" \
+        --placeholder "e.g. Why does CI fail on ARM? How is auth wired?" \
+        --height 6
+}
+
+compose() {
+    local line
+    unset HISTFILE                      # never append this script's own commands
+    history -c
+    [[ -f "$hist_file" ]] && history -r "$hist_file"
+    if command -v gum &>/dev/null; then
+        gum style --foreground 240 "What do you need to know about this codebase?  (↑/↓ history · Ctrl-R search · empty Enter: multi-line)" >&2
+    else
+        echo "What do you need to know about this codebase?  (↑/↓ history · Ctrl-R search)" >&2
+    fi
+    IFS= read -e -r -p "> " line || exit 0
+    if [[ -z "${line//[[:space:]]/}" ]] && command -v gum &>/dev/null; then
+        compose_long
+    else
+        printf '%s' "$line"
+    fi
+}
+
+if [[ $# -gt 0 ]]; then
+    prompt="$*"
+else
+    prompt="$(compose)"
+fi
+
+prompt=$(printf '%s\n' "${prompt}" | sed -n '/[^[:space:]]/p')
+[[ -z "${prompt}" ]] && exit 0
+remember "$prompt"
+
 # Create it as the invoking user: if docker creates a missing bind source it is
 # root-owned and the (non-root) container can't write the session or logbook.
 mkdir -p "$data_dir"

@@ -36,7 +36,7 @@ def cli_hermetic(tmp_path, monkeypatch):
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MRAI_DIR", str(tmp_path / ".mrai"))
-    monkeypatch.setenv("MRAI_SANDBOXED", "1")  # ← add
+    monkeypatch.setenv("MRAI_SANDBOXED", "1")  # tests run in-process, never under bwrap
     monkeypatch.setattr(router.httpx, "post", _no_network)
     return tmp_path
 

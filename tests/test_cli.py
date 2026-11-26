@@ -98,6 +98,21 @@ def test_version_flag_prints_version(cli_hermetic):
     assert result.output.strip().startswith("mrai ")
 
 
+def test_sandbox_without_bwrap_says_why(cli_hermetic, monkeypatch):
+    monkeypatch.delenv("MRAI_SANDBOXED")
+    monkeypatch.setattr(cli.sys, "platform", "linux")
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    result = _ai("hello")
+    assert result.exit_code == 1
+    assert "bubblewrap" in result.output and "--no-sandbox" in result.output
+
+
+def test_no_sandbox_skips_bwrap(cli_hermetic, monkeypatch):
+    monkeypatch.delenv("MRAI_SANDBOXED")
+    monkeypatch.setattr(cli, "_enter_sandbox", lambda **k: pytest.fail("sandboxed"))
+    assert _ai("--no-sandbox").exit_code == 0  # no query: prints help
+
+
 # --- picking the final answer ------------------------------------------------
 
 

@@ -529,6 +529,10 @@ def _enter_sandbox(no_web: bool) -> None:
     if os.getenv("MRAI_SANDBOXED"):
         return
     if shutil.which("bwrap") is None:
+        console.print(
+            "[red]--sandbox needs bubblewrap (bwrap), which is not installed.[/red] "
+            "Install it, or pass --no-sandbox to run unsandboxed."
+        )
         raise typer.Exit(1)
     cwd, home = os.getcwd(), os.path.expanduser("~")
     cmd = [
@@ -562,7 +566,7 @@ def _enter_sandbox(no_web: bool) -> None:
     ]
     if no_web:
         cmd += ["--unshare-net"]
-    argv = [a for a in sys.argv if a != "--sandbox"]  # strip to avoid re-entry
+    argv = [a for a in sys.argv if a not in ("--sandbox", "-b")]  # strip to avoid re-entry
     os.execvpe("bwrap", cmd + argv, {**os.environ, "MRAI_SANDBOXED": "1"})
 
 
@@ -575,7 +579,10 @@ def main(
     pro: bool = typer.Option(False, "--pro", "-p", help="force the pro-tier model"),
     subagents: bool = typer.Option(False, "--subagents", "-s", help="enable the explorer subagent"),
     sandbox: bool = typer.Option(
-        True, "--sandbox", "-b", help="enable sandboxing and run natively"
+        True,
+        "--sandbox/--no-sandbox",
+        "-b",
+        help="re-run inside bubblewrap (Linux; a no-op in the Docker image, which is the sandbox)",
     ),
     no_subagents: bool = typer.Option(
         False, "--no-subagents", help="disable the explorer subagent"

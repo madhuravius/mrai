@@ -104,3 +104,15 @@ def test_agents_get_tool_timeouts_and_the_retrying_client(cli_hermetic):
 
     client = plain.model._provider.client._client  # type: ignore[union-attr]
     assert isinstance(client._transport, RetryTransport)
+
+
+def test_anthropic_provider_uses_native_model_caching_and_native_output(cli_hermetic):
+    from pydantic_ai import NativeOutput
+    from pydantic_ai.models.anthropic import AnthropicModel
+
+    s = Settings(provider="anthropic", openrouter_api_key="sk-ant")
+    model = agent_mod._model(s, "sk-ant", "claude-opus-5-5")
+    assert isinstance(model, AnthropicModel)
+    assert model.settings is not None and model.settings.get("anthropic_cache") is True
+    [writer] = agent_mod.build_writers(cli_hermetic, "claude-opus-5-5", ["a"], settings=s)
+    assert isinstance(writer.output_type, NativeOutput)

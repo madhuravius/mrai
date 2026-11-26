@@ -644,6 +644,9 @@ def main(
         "--no-memory",
         help="do not inject long-term memory (logbook index + MRAI_MEMORY_FILE)",
     ),
+    profile: str | None = typer.Option(
+        None, "--profile", help="mrai.yml profile to use (default: MRAI_PROFILE, else `profile:`)"
+    ),
     reindex: bool = typer.Option(
         False,
         "--reindex",
@@ -654,6 +657,8 @@ def main(
     if version:
         typer.echo(f"mrai {VERSION}")
         raise typer.Exit(0)
+    if profile:
+        os.environ["MRAI_PROFILE"] = profile
     if sandbox:
         _enter_sandbox(no_web=no_web)
     if reindex:
@@ -779,7 +784,7 @@ def main(
             idx, scores, pick_cost, pick_err = select_final_answer(
                 query,
                 [(c.topic, c.title, c.markdown) for c in candidates],
-                settings.openrouter_api_key,
+                settings.jev_api_key,
                 settings,
             )
     if idx is None:

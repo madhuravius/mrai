@@ -25,6 +25,7 @@ def isolated_mrai_home(tmp_path, monkeypatch):
     monkeypatch.delenv("MRAI_DIR", raising=False)
     monkeypatch.delenv("MRAI_HOST_DIR", raising=False)
     monkeypatch.delenv("MRAI_HOST_HOME", raising=False)
+    monkeypatch.delenv("MRAI_PROFILE", raising=False)
 
 
 def _no_network(*args, **kwargs):

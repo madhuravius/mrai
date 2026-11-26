@@ -405,3 +405,17 @@ def test_openrouter_models_request_usage_accounting():
 
     model = agent_mod._model(cli.Settings(openrouter_api_key="k"), "k", "a/b")
     assert model.settings == {"openrouter_usage": {"include": True}}
+
+
+def test_profile_flag_selects_the_profile(pipeline, monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        cli,
+        "resolve_route",
+        lambda *a, **k: (
+            seen.append(cli.os.environ.get("MRAI_PROFILE")) or cli.Route("m", 1.0, "flag")
+        ),
+    )
+    pipeline([_answer(1)])
+    _ai("--no-write", "--profile", "work", "hello")
+    assert seen == ["work"]

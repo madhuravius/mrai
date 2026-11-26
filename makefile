@@ -21,7 +21,8 @@ install: docker-build ## build the image and install the ./ai wrapper to ~/.loca
 	@[[ ":$${PATH}:" == *":$${HOME}/.local/bin:"* ]] || echo "⚠  add ~/.local/bin to your PATH"
 
 docker-build: ## build a docker image that runs mrai
-	docker build -t ghcr.io/madhuravius/mrai .
+	docker build -t ghcr.io/madhuravius/mrai \
+		--label org.opencontainers.image.version="$$(git describe --tags --always 2>/dev/null || echo dev)" .
 
 docker-run: docker-build ## run the locally built image via ./ai (per-repo state under ~/.mrai/workspaces)
 	./ai $(filter-out $@,$(MAKECMDGOALS))

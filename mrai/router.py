@@ -161,7 +161,7 @@ def select_final_answer(
     try:
         resp = httpx.post(
             s.decisions_url,
-            headers={"Authorization": f"Bearer {key or s.openrouter_api_key}"},
+            headers={"Authorization": f"Bearer {key or s.jev_api_key}"},
             json={"model": s.jev_model, "state": {"query": query}, "questions": questions},
             timeout=s.timeout,
         )
@@ -212,7 +212,7 @@ def resolve_route(
             tier="pro",
         )
 
-    verdict, jev_error = classify_task(query, s.openrouter_api_key, s)
+    verdict, jev_error = classify_task(query, s.jev_api_key, s)
     if verdict is None:
         return _forced(
             s.pro_model, "fallback", None, jev_error=jev_error, tier="pro"

@@ -38,6 +38,31 @@ Tier names are labels, not model IDs: the actual flash/pro models are the
 `MRAI_FLASH_MODEL` / `MRAI_PRO_MODEL` settings defaults, overridable via
 `--model`, `MRAI_MODEL`, or those env vars.
 
+## Config and providers
+
+Settings come from `MRAI_*` env vars, `.env`, then `~/.mrai/mrai.yml` and
+`.mrai/mrai.yml` (repo wins). Profiles switch provider, endpoints and models in
+one go; keys stay in the environment:
+
+```yaml
+profile: openrouter # default; MRAI_PROFILE or --profile overrides
+profiles:
+  openrouter:
+    provider: openrouter
+    pro_model: deepseek/deepseek-v4-pro
+  anthropic:
+    provider: anthropic # native Claude API
+    api_key_env: ANTHROPIC_API_KEY
+    jev_api_key_env: OPENROUTER_API_KEY # Jev is OpenRouter-only
+    pro_model: claude-opus-5-5
+    flash_model: claude-haiku-5-5
+```
+
+`provider` is `openrouter`, `anthropic`, or `openai` (any OpenAI-compatible
+gateway at `base_url`). Without `jev_api_key_env`, Jev uses the model key; off
+OpenRouter, set it or `route_enabled: false` (web fetch needs Jev). See
+`mrai.example.yml`.
+
 ## Common flags
 
 | Flag | Effect |
@@ -51,13 +76,13 @@ Tier names are labels, not model IDs: the actual flash/pro models are the
 | `--no-write` | print answer only; skip the logbook and don't persist the session roll |
 | `--no-web` | disable `web_fetch` |
 | `-d, --deny <glob>` | add a read-deny pattern (repeatable) |
+| `--profile <name>` | use a profile from `mrai.yml` |
 | `--reindex` | rebuild the HTML site for all workspaces, then exit |
 
 ## Notes
 
 - `web_fetch` is human-in-the-loop: nothing is fetched until you approve the URL
   on the terminal (3 attempts; private/localhost URLs refused).
-- Config lives in `mrai/settings.py` (pydantic-settings, env prefix `MRAI_`, `.env`).
 - State lives under `.mrai/` (gitignored); use `--no-write` to skip it.
 - Each logged answer also gets an HTML page in one shared static site,
   `~/.mrai/site/<workspace>--<topic>.html`, with keyword search and a file list

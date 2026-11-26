@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="{{ csp }}">
+<meta name="referrer" content="no-referrer">
+<title>{{ title }}</title>
+<link id="hl-light" rel="stylesheet" href="{{ hljs.base }}/styles/github.min.css"
+      integrity="{{ hljs.light_sri }}" crossorigin="anonymous" media="(prefers-color-scheme: light)">
+<link id="hl-dark" rel="stylesheet" href="{{ hljs.base }}/styles/monokai.min.css"
+      integrity="{{ hljs.dark_sri }}" crossorigin="anonymous" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="../style.css?v={{ asset_version }}">
+<script src="{{ hljs.base }}/highlight.min.js" integrity="{{ hljs.js_sri }}" crossorigin="anonymous" defer></script>
+<script src="../index.js" defer></script>
+<script src="../app.js?v={{ asset_version }}"></script>
+</head>
+<body>
+<button id="mrai-nav-toggle" class="icon-btn" type="button" aria-label="Toggle file list" title="Toggle file list">☰</button>
+<button id="mrai-theme" class="icon-btn" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">☾</button>
+
+<nav id="mrai-nav" aria-label="Files">
+  <div class="nav-head">All workspaces · newest first</div>
+  <ul id="mrai-files" class="mrai-list"></ul>
+</nav>
+
+<div id="mrai-search">
+  <input id="mrai-q" type="search" placeholder="Search mrai notes across all workspaces…" autocomplete="off">
+  <div id="mrai-count"></div>
+  <div id="mrai-panes" hidden>
+    <ul id="mrai-results" class="mrai-list"></ul>
+    <div id="mrai-preview"></div>
+  </div>
+</div>
+
+<article>
+{{ body }}
+</article>
+
+<template id="tpl-item">
+  <li>
+    <button type="button" class="pick">
+      <span class="title"></span>
+      <span class="meta"></span>
+      <span class="desc"></span>
+    </button>
+    <a class="go" title="Open page">›</a>
+  </li>
+</template>
+<template id="tpl-preview-head">
+  <div class="crumb"></div>
+  <span class="meta"></span>
+</template>
+</body>
+</html>

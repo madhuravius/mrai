@@ -41,8 +41,24 @@ compose_long() {
         --height 6
 }
 
+# Erase the terminal rows the "> <text>" input line wrapped onto, so it can be redrawn.
+erase_input() {
+    [[ -t 2 ]] || return 0
+    local cols
+    cols=$(stty size </dev/tty 2>/dev/null | cut -d' ' -f2)
+    [[ "$cols" =~ ^[1-9][0-9]*$ ]] || cols=80
+    printf '\e[%dA\e[J' $(((2 + ${#1} + cols - 1) / cols)) >&2
+}
+
+# Redraw the prompt in green: it's accepted, and the container is starting.
+show_submitted() {
+    [[ -t 2 && -n "${1//[[:space:]]/}" ]] || return 0
+    local l
+    while IFS= read -r l; do printf '\e[32m> %s\e[0m\n' "$l" >&2; done <<<"$1"
+}
+
 compose() {
-    local line
+    local line text
     unset HISTFILE
     history -c
     [[ -f "$hist_file" ]] && history -r "$hist_file"
@@ -52,11 +68,14 @@ compose() {
         echo "What do you need to know about this codebase?  (↑/↓ history · Ctrl-R search)" >&2
     fi
     IFS= read -e -r -p "> " line || exit 0
+    erase_input "$line"
     if [[ -z "${line//[[:space:]]/}" ]] && command -v gum &>/dev/null; then
-        compose_long
+        text=$(compose_long)
     else
-        printf '%s' "$line"
+        text=$line
     fi
+    show_submitted "$text"
+    printf '%s' "$text"
 }
 
 if [[ $# -gt 0 ]]; then
@@ -70,9 +89,18 @@ prompt=$(printf '%s\n' "${prompt}" | sed -n '/[^[:space:]]/p')
 remember "$prompt"
 
 # docker would create a missing bind source as root
-mkdir -p "$data_dir"
+mkdir -p "$data_dir" "$mrai_home/site"
 
-mounts=(-v "$data_dir:/tmp/mrai-data" -v "$pwd:$pwd:ro")
+# All workspaces read-only (the cross-workspace search index reads every topic log;
+# the agent's own tools stay confined to the repo), this workspace and the shared
+# HTML site writable. Paths mirror the host layout under /tmp/mrai-home.
+ws_root=/tmp/mrai-home/workspaces
+mounts=(
+    -v "$mrai_home/workspaces:$ws_root:ro"
+    -v "$data_dir:$ws_root/$key"
+    -v "$mrai_home/site:/tmp/mrai-home/site"
+    -v "$pwd:$pwd:ro"
+)
 # Shared config is optional; only mount it if it is a real file (a missing
 # source would otherwise be created by docker as a root-owned directory).
 if [[ -f "$mrai_home/mrai.yml" ]]; then
@@ -91,8 +119,9 @@ docker run --rm -it \
 	-e MRAI_OPENROUTER_API_KEY \
 	-e OPENROUTER_API_KEY \
 	-e OPENAI_API_KEY \
-	-e MRAI_DIR=/tmp/mrai-data \
+	-e MRAI_DIR="$ws_root/$key" \
 	-e MRAI_HOST_DIR="$data_dir" \
+	-e MRAI_HOST_HOME="$mrai_home" \
 	-e MRAI_HOME=/tmp/mrai-home \
 	-e COLUMNS \
 	-e TERM \

@@ -27,8 +27,9 @@ def test_full_run_answers_logs_and_saves_session(git_repo, cli_hermetic, offline
     assert "tool calls (1): git_status: 1" in result.output
     assert "Jev final selection unavailable" in result.output
     assert json.loads((state / "session.json").read_text())
-    assert list((state / "renders").glob("*.html"))
-    assert list(state.glob("*.md"))
+    assert list((cli_hermetic / "mrai-home" / "site" / ".mrai").glob("*.html"))
+    [log] = [p for p in state.glob("*.md") if p.name != "memories.md"]
+    assert "| Run stats | |" in log.read_text()
 
 
 def test_no_write_leaves_no_state(git_repo, cli_hermetic, offline_models):

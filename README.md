@@ -51,6 +51,7 @@ Tier names are labels, not model IDs: the actual flash/pro models are the
 | `--no-write` | print answer only; skip the logbook and don't persist the session roll |
 | `--no-web` | disable `web_fetch` |
 | `-d, --deny <glob>` | add a read-deny pattern (repeatable) |
+| `--reindex` | rebuild the HTML site for all workspaces, then exit |
 
 ## Notes
 
@@ -58,6 +59,11 @@ Tier names are labels, not model IDs: the actual flash/pro models are the
   on the terminal (3 attempts; private/localhost URLs refused).
 - Config lives in `mrai/settings.py` (pydantic-settings, env prefix `MRAI_`, `.env`).
 - State lives under `.mrai/` (gitignored); use `--no-write` to skip it.
+- Each logged answer also gets an HTML page in one shared static site,
+  `~/.mrai/site/<workspace>/<topic>.html`, with keyword search and a file list
+  across every workspace, plus a light/dark toggle. No server: pages share
+  `app.js`/`style.css` (from `mrai/render/`) and `index.js` (the global search
+  index, rewritten per answer). Run `--reindex` to rebuild the whole site.
 - The read-only deny list is code-only and cannot be weakened by env.
 
 ## Tests

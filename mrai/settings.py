@@ -8,8 +8,11 @@ env-overridable.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
 import os
+import re
+from pathlib import Path
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import (
@@ -35,10 +38,31 @@ def _package_version() -> str:
 VERSION = _package_version()
 
 
+def mrai_home() -> Path:
+    """Root of all mrai state: MRAI_HOME, else ~/.mrai. Holds the shared mrai.yml."""
+    return Path(os.getenv("MRAI_HOME") or Path.home() / ".mrai")
+
+
+def workspace_key(root: Path) -> str:
+    """Stable per-directory key: `<basename-slug>-<sha256(path)[:8]>`.
+
+    The hash keeps same-named checkouts (~/a/api vs ~/b/api) apart; the slug
+    keeps it readable. Byte-level so the `./ai` wrapper can mirror it exactly
+    in shell -- keep the two in sync.
+    """
+    path = str(root)
+    name = re.sub(rb"[^a-z0-9]+", b"-", Path(path).name.encode().lower()).decode()
+    name = name.strip("-")[:40].rstrip("-") or "root"
+    return f"{name}-{hashlib.sha256(path.encode()).hexdigest()[:8]}"
+
+
+def default_mrai_dir(root: Path) -> Path:
+    """Per-workspace state dir (session roll, logbook, memories), so repos never share context."""
+    return mrai_home() / "workspaces" / workspace_key(root)
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_prefix="MRAI_", env_file=".env", extra="ignore", yaml_file=".mrai/mrai.yml"
-    )
+    model_config = SettingsConfigDict(env_prefix="MRAI_", env_file=".env", extra="ignore")
 
     # models
     pro_model: str = DEFAULT_PRO_MODEL
@@ -59,9 +83,10 @@ class Settings(BaseSettings):
     max_requests: int = 100  # MRAI_MAX_REQUESTS
 
     # session history + long-term memory (CLI-injected; the model never writes these)
-    session_file: str = "session.json"  # MRAI_SESSION_FILE — conversation roll under .mrai/
-    memory_file: str = "memories.md"  # MRAI_MEMORY_FILE — long-term memory notes under .mrai/
-    max_history: int = 20  # MRAI_MAX_HISTORY — last-N messages trimmed from .mrai/session.json
+    # all three live in the per-workspace dir (default_mrai_dir / MRAI_DIR / --dir)
+    session_file: str = "session.json"  # MRAI_SESSION_FILE — conversation roll
+    memory_file: str = "memories.md"  # MRAI_MEMORY_FILE — long-term memory notes
+    max_history: int = 20  # MRAI_MAX_HISTORY — last-N messages trimmed from the session roll
 
     # web fetch
     web_budget: int = 3
@@ -100,7 +125,10 @@ class Settings(BaseSettings):
             init_settings,
             env_settings,
             dotenv_settings,
-            YamlConfigSettingsSource(settings_cls),
+            # shared ~/.mrai/mrai.yml first, then the repo's .mrai/mrai.yml overrides it
+            YamlConfigSettingsSource(
+                settings_cls, yaml_file=[mrai_home() / "mrai.yml", Path(".mrai/mrai.yml")]
+            ),
             file_secret_settings,
         )
 

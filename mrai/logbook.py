@@ -11,7 +11,7 @@ def slugify(text: str) -> str:
     """kebab-case slug, ASCII-only."""
     text = text.encode("ascii", "ignore").decode().lower()
     text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
-    return text or "untitled"
+    return (text or "untitled")[:80].rstrip("-")
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -95,12 +95,15 @@ class Logbook:
             if len(topics) > topic_limit:
                 shown += f" …and {len(topics) - topic_limit} more"
             bits.append(
-                f"Logged topics under .mrai/*.md ({len(topics)}): {shown}. "
-                "Reuse an existing topic slug when your answer relates; read files on demand."
+                f"Previously logged topics for this workspace ({len(topics)}): {shown}. "
+                "Reuse an existing topic slug when your answer relates."
             )
         if memory_file.is_file():
             text = memory_file.read_text(encoding="utf-8").strip()
             if len(text) > memory_chars:
-                text = text[:memory_chars].rstrip() + "\n… [truncated]"
-            bits.append(f"Memory notes ({memory_file}):\n{text}")
+                # the file is append-only, so keep the newest notes (the tail),
+                # cut on a line boundary
+                tail = text[-memory_chars:]
+                text = "… [older notes truncated]\n" + tail[tail.find("\n") + 1 :]
+            bits.append(f"Memory notes (newest last):\n{text}")
         return "\n\n".join(bits)

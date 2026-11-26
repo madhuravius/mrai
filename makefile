@@ -3,7 +3,7 @@ UV    ?= uv
 
 .DEFAULT_GOAL := help
 
-.PHONY: help sync build test lint fmt typecheck check run docker-build docker-run
+.PHONY: help sync build test lint fmt typecheck check run docker-build docker-run install
 
 %:
 	@:
@@ -14,26 +14,17 @@ help:
 sync: ## uv sync
 	$(UV) sync
 
-docker-build:
-	docker build -t mrai .
+install: ## install the ./ai wrapper to ~/.local/bin
+	@mkdir -p ~/.local/bin
+	@install -m 755 ai ~/.local/bin/ai
+	@echo "ok  ~/.local/bin/ai"
+	@[[ ":$${PATH}:" == *":$${HOME}/.local/bin:"* ]] || echo "⚠  add ~/.local/bin to your PATH"
 
-docker-run:
-	@mkdir -p ~/.mrai/renders
-	@mkdir -p .mrai/renders
-	docker run --rm -it \
-		--user "$$(id -u):$$(id -g)" \
-		--tmpfs /tmp \
-		--tmpfs /home/nonroot/.cache \
-		--cap-drop ALL \
-		--security-opt=no-new-privileges \
-		-v ~/.mrai:/tmp/mrai-data \
-		-v "$$(pwd):$$(pwd):ro" \
-		-v "$$(pwd)/.mrai:$$(pwd)/.mrai" \
-		-w "$$(pwd)" \
-		-e OPENROUTER_API_KEY \
-		-e MRAI_DIR=/tmp/mrai-data \
-		-e COLUMNS \
-		mrai $(filter-out $@,$(MAKECMDGOALS))
+docker-build: ## build a docker image that runs mrai
+	docker build -t ghcr.io/madhuravius/mrai .
+
+docker-run: docker-build ## run the locally built image via ./ai (per-repo state under ~/.mrai/workspaces)
+	./ai $(filter-out $@,$(MAKECMDGOALS))
 
 test: ## uv run pytest
 	$(UV) run pytest --cov=mrai --cov-report=term-missing -q

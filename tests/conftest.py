@@ -18,6 +18,14 @@ def keyless_env(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def isolated_mrai_home(tmp_path, monkeypatch):
+    """Never read the developer's ~/.mrai (shared mrai.yml, workspaces) from tests."""
+    monkeypatch.setenv("MRAI_HOME", str(tmp_path / "mrai-home"))
+    monkeypatch.delenv("MRAI_DIR", raising=False)
+    monkeypatch.delenv("MRAI_HOST_DIR", raising=False)
+
+
 def _no_network(*args, **kwargs):
     raise AssertionError("network call should not happen")
 

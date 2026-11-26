@@ -207,6 +207,7 @@ class WebFetchTool:
             timeout=self._timeout,
             follow_redirects=True,
             event_hooks={"request": [self._guard_redirect]},
+            transport=httpx.HTTPTransport(retries=2),
         )
         self._budget = s.web_budget if budget is None else budget
         self._max = s.max_attempts if max_attempts is None else max_attempts

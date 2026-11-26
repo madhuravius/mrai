@@ -34,8 +34,8 @@ OutputT = TypeVar("OutputT")
 class MemoryDeps:
     """Per-run deps: injected long-term context. Read-only; owned by the CLI.
 
-    Carries the memory block computed from `.mrai/` (logbook index +
-    MRAI_MEMORY_FILE). The agent reads it via `@agent.instructions`; it has no
+    Carries the memory block computed from the per-workspace state dir
+    (logbook index + MRAI_MEMORY_FILE). The agent reads it via `@agent.instructions`; it has no
     write path back to disk.
     """
 
@@ -44,7 +44,7 @@ class MemoryDeps:
 
 class Answer(BaseModel):
     topic: str = Field(
-        description="kebab-case slug, max 5 words; reuse an existing .mrai topic when related"
+        description="kebab-case slug, max 5 words; reuse a logged topic from known context when related"
     )
     title: str = Field(description="short human-readable title for the log entry")
     markdown: str = Field(description="the terse, developer-oriented markdown answer")

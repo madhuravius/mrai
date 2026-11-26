@@ -23,7 +23,7 @@ from pydantic_ai import (
     ThinkingPartDelta,
     UnexpectedModelBehavior,
 )
-from pydantic_ai.exceptions import UsageLimitExceeded
+from pydantic_ai.exceptions import UsageLimitExceeded, UserError
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter, ToolCallPart
 from pydantic_ai.usage import RunUsage, UsageLimits
 from rich.console import Console, Group
@@ -35,7 +35,13 @@ from rich.text import Text
 from .agent import Answer, MemoryDeps, build_researcher, build_writers
 from .logbook import Logbook, _atomic_write_text, slugify
 from .router import Route, resolve_route, select_final_answer
-from .settings import UPSTREAM_RETRY_MARKERS, VERSION, Settings, env_deny_patterns
+from .settings import (
+    UPSTREAM_RETRY_MARKERS,
+    VERSION,
+    Settings,
+    default_mrai_dir,
+    env_deny_patterns,
+)
 from .webfetch import WebFetchTool
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -443,7 +449,8 @@ async def _run_pipeline(
     return research, list(results), _merge_usage(r_usage, *w_usages)
 
 
-def _write_render(topic: str, markdown: str) -> Path:
+def _write_render(mrai_dir: Path, topic: str, markdown: str) -> Path:
+    """HTML copy of the answer under <state dir>/renders (never in the repo, which may be mounted ro)."""
     md = MarkdownIt("gfm-like", {"linkify": True})
     body = md.render(markdown)
     html = f"""<!DOCTYPE html>
@@ -478,8 +485,7 @@ pre:hover .copy-btn, .copy-btn:focus {{ opacity: 1; }}
   }});
 }})();
 </script></body></html>"""
-    path = Path(".mrai/renders") / f"{slugify(topic)}.html"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path = mrai_dir / "renders" / f"{slugify(topic)}.html"
     _atomic_write_text(path=path, text=html)
     return path
 
@@ -496,7 +502,11 @@ def main(
         False, "--no-subagents", help="disable the explorer subagent"
     ),
     model: str | None = typer.Option(None, "--model", "-m", help="OpenRouter model id"),
-    mrai_dir: Path = typer.Option(Path.home() / ".mrai", "--dir", help="markdown log directory"),
+    mrai_dir: Path | None = typer.Option(
+        None,
+        "--dir",
+        help="state dir (session, logbook, memories); default: MRAI_DIR, else ~/.mrai/workspaces/<cwd key>",
+    ),
     no_write: bool = typer.Option(False, "--no-write", help="print answer only, do not log"),
     no_web: bool = typer.Option(False, "--no-web", help="disable the web_fetch tool"),
     max_web_fetches: int | None = typer.Option(
@@ -511,7 +521,7 @@ def main(
         help="do not inject long-term memory (logbook index + MRAI_MEMORY_FILE)",
     ),
 ) -> None:
-    """Answer a dev query against the repo, logging to .mrai/*.md. Jev routes model + subagents; web_fetch is Jev-screened and human-approved."""
+    """Answer a dev query against the repo, logging to a per-workspace state dir. Jev routes model + subagents; web_fetch is Jev-screened and human-approved."""
     if version:
         typer.echo(f"mrai {VERSION}")
         raise typer.Exit(0)
@@ -533,7 +543,8 @@ def main(
         console.print(f"[routing] {route.describe()}")
     if route.jev_error:
         console.print(f"[dim]warning: Jev unavailable ({route.jev_error}); routing fell back[/dim]")
-    mrai_dir = Path(os.getenv("MRAI_DIR") or mrai_dir)
+    mrai_dir = resolve_mrai_dir(mrai_dir)
+    console.print(f"[dim]state: {mrai_dir}[/dim]")
     settings = Settings()
     session_path = mrai_dir / settings.session_file
     memory_file = mrai_dir / settings.memory_file
@@ -576,18 +587,32 @@ def main(
         console.print(f"[red]model setup failed:[/red] {exc}")
         raise typer.Exit(1) from None
 
+    def run_once():
+        """One pipeline run. History from another workspace (a session written
+        from a different cwd/host path) is dropped once and the run restarted fresh."""
+        nonlocal history
+        try:
+            return asyncio.run(
+                _run_pipeline(researcher, writers, query, history or None, deps, settings)
+            )
+        except UserError as exc:
+            if not history or "workspace" not in str(exc):
+                raise
+            console.print(
+                f"[yellow]session history belongs to another workspace; starting fresh[/yellow] "
+                f"[dim]({_one_line(str(exc))})[/dim]"
+            )
+            history = []
+            return asyncio.run(_run_pipeline(researcher, writers, query, None, deps, settings))
+
     try:
-        research, results, usage = asyncio.run(
-            _run_pipeline(researcher, writers, query, history or None, deps, settings)
-        )
+        research, results, usage = run_once()
     except ToolCallTimeout as exc:
         console.print(
             f"[yellow]tool call exceeded {settings.tool_timeout:.0f}s ({exc}); retrying run once[/yellow]"
         )
         try:
-            research, results, usage = asyncio.run(
-                _run_pipeline(researcher, writers, query, history or None, deps, settings)
-            )
+            research, results, usage = run_once()
         except (ToolCallTimeout, UnexpectedModelBehavior, AgentRunError) as exc2:
             _log_failure(mrai_dir, query, f"retry failed: {_one_line(str(exc2))}", no_write)
             console.print("[yellow]retry also failed; giving up[/yellow]")
@@ -609,9 +634,7 @@ def main(
                 f"[yellow]upstream HTTP 504/529/429 ({_one_line(str(exc))}); retrying run once[/yellow]"
             )
             try:
-                research, results, usage = asyncio.run(
-                    _run_pipeline(researcher, writers, query, history or None, deps, settings)
-                )
+                research, results, usage = run_once()
             except AgentRunError as exc2:
                 _log_failure(
                     mrai_dir,
@@ -692,8 +715,32 @@ def _trim_history(messages: Sequence[ModelMessage], max_history: int) -> list[Mo
     return messages
 
 
+def _host_path(path: Path, mrai_dir: Path) -> Path:
+    """Map a state-dir path to its host location when running in the ./ai container
+    (MRAI_HOST_DIR = the host side of the MRAI_DIR bind mount), so links are clickable."""
+    host = os.getenv("MRAI_HOST_DIR")
+    if not host:
+        return path
+    with suppress(ValueError):
+        return Path(host) / path.relative_to(mrai_dir.resolve())
+    return path
+
+
+def resolve_mrai_dir(flag: Path | None, cwd: Path | None = None) -> Path:
+    """--dir > MRAI_DIR > ~/.mrai/workspaces/<key of cwd>.
+
+    Keyed on cwd (the same root LocalWorkspace uses as its identity), so a
+    session roll only ever holds history from the workspace it is replayed in.
+    """
+    if flag is not None:
+        return flag
+    if env := os.getenv("MRAI_DIR"):
+        return Path(env)
+    return default_mrai_dir(cwd or Path.cwd())
+
+
 def _load_history(path: Path, max_history: int) -> list[ModelMessage]:
-    """Read .mrai/session.json -> last-N ModelMessages; [] on missing/invalid data."""
+    """Read the session roll -> last-N ModelMessages; [] on missing/invalid data."""
     if not path.is_file():
         return []
     try:
@@ -766,8 +813,8 @@ def _log_topic(
         path, created = lb.append(topic, title, query, markdown)
         lb.remember(memory_file, topic, title)
         bits.append(f"[bold green]{'new' if created else 'appended'}[/bold green] {path}")
-        html_path = _write_render(topic, markdown)
-        console.print(f"[dim]render:[/dim] file://{html_path.resolve()}")
+        html_path = _write_render(mrai_dir, topic, markdown)
+        console.print(f"[dim]render:[/dim] file://{_host_path(html_path.resolve(), mrai_dir)}")
     console.print(" · ".join(bits))
 
 

@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Usage: ai [prompt...]   (no args: compose the prompt in gum)
+if [[ $# -gt 0 ]]; then
+    prompt="$*"
+else
+    if ! command -v gum &>/dev/null; then
+        echo "gum is required — https://github.com/charmbracelet/gum#installation"
+        exit 1
+    fi
+    prompt="$(gum write \
+        --header "What do you need to know about this codebase?" \
+        --placeholder "e.g. Why does CI fail on ARM? How is auth wired?" \
+        --height 6)"
+fi
+
+prompt=$(printf '%s\n' "${prompt}" | sed -n '/[^[:space:]]/p')
+[[ -z "${prompt}" ]] && exit 0
+
+# Physical path: matches Path.cwd() inside the container, so the workspace id
+# (local:<path>) and the state-dir key below agree with native `mrai` runs.
+pwd=$(pwd -P)
+
+# Mirror of mrai.settings.workspace_key: <basename-slug>-<sha256(path)[:8]>.
+sha256() { if command -v sha256sum &>/dev/null; then sha256sum; else shasum -a 256; fi; }
+name=$(basename "$pwd" | LC_ALL=C tr 'A-Z' 'a-z' | LC_ALL=C sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')
+name=$(printf '%s' "${name:0:40}" | sed -E 's/-+$//')
+key="${name:-root}-$(printf '%s' "$pwd" | sha256 | cut -c1-8)"
+
+mrai_home="${MRAI_HOME:-$HOME/.mrai}"
+data_dir="$mrai_home/workspaces/$key"
+# Create it as the invoking user: if docker creates a missing bind source it is
+# root-owned and the (non-root) container can't write the session or logbook.
+mkdir -p "$data_dir"
+
+mounts=(-v "$data_dir:/tmp/mrai-data" -v "$pwd:$pwd:ro")
+# Shared config is optional; only mount it if it is a real file (a missing
+# source would otherwise be created by docker as a root-owned directory).
+if [[ -f "$mrai_home/mrai.yml" ]]; then
+    mounts+=(-v "$mrai_home/mrai.yml:/tmp/mrai-home/mrai.yml:ro")
+fi
+
+docker run --rm -it \
+	--user "$(id -u):$(id -g)" \
+	--tmpfs /tmp \
+	--tmpfs /home/nonroot/.cache \
+	--cap-drop ALL \
+	--security-opt=no-new-privileges \
+	"${mounts[@]}" \
+	-w "$pwd" \
+	-e MRAI_API_KEY \
+	-e MRAI_OPENROUTER_API_KEY \
+	-e OPENROUTER_API_KEY \
+	-e OPENAI_API_KEY \
+	-e MRAI_DIR=/tmp/mrai-data \
+	-e MRAI_HOST_DIR="$data_dir" \
+	-e MRAI_HOME=/tmp/mrai-home \
+	-e COLUMNS \
+	"${MRAI_IMAGE:-ghcr.io/madhuravius/mrai}" "$prompt"

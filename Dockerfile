@@ -1,12 +1,14 @@
-FROM cgr.dev/chainguard/python:latest-dev AS build
+FROM python:3.14-alpine AS build
+COPY --link --from=ghcr.io/astral-sh/uv:0.9.14 /uv /uvx /bin/
 WORKDIR /app
-COPY pyproject.toml README.md LICENSE ./
-COPY mrai/ ./mrai/
-RUN python -m venv /app/venv && /app/venv/bin/pip install --no-cache-dir .
+COPY . .
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-editable
 
-FROM cgr.dev/chainguard/python:latest
-COPY --from=build /app/venv /app/venv
-ENV PATH="/app/venv/bin:$PATH"
+FROM python:3.14-alpine
+RUN adduser -D nonroot
+COPY --link --from=build /app/.venv /app/.venv
+ENV PATH="/app/.venv/bin:$PATH"
 WORKDIR /repo
 USER nonroot
 ENTRYPOINT ["mrai"]

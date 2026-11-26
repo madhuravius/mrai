@@ -229,11 +229,80 @@ def test_pipeline_failure_exits_and_logs_stub(cli_hermetic, monkeypatch):
     assert "tool call exceeded" in result.output
 
 
-def test_write_render_writes_html(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    path = cli._write_render("hello world", "# Hi\n\nSee `x`.")
+def test_write_render_writes_html_under_state_dir(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    state = tmp_path / "state"
+    path = cli._write_render(state, "hello world", "# Hi\n\nSee `x`.")
 
-    render = tmp_path / ".mrai" / "renders" / "hello-world.html"
-    assert path.exists()
-    assert render.is_file()
-    assert "<h1>Hi</h1>" in render.read_text()
+    assert path == state / "renders" / "hello-world.html"
+    assert "<h1>Hi</h1>" in path.read_text()
+    assert not (repo / ".mrai").exists()  # never written into the (possibly ro) repo
+
+
+def test_host_path_maps_container_state_dir_to_host(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    inside = state / "renders" / "x.html"
+    assert cli._host_path(inside, state) == inside  # no mapping outside the container
+    monkeypatch.setenv("MRAI_HOST_DIR", "/home/u/.mrai/workspaces/repo-1234abcd")
+    assert cli._host_path(inside, state) == cli.Path(
+        "/home/u/.mrai/workspaces/repo-1234abcd/renders/x.html"
+    )
+
+
+def test_resolve_mrai_dir_precedence(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    default = cli.resolve_mrai_dir(None, repo)
+    assert default.parent == tmp_path / "mrai-home" / "workspaces"
+    assert default.name.startswith("repo-")
+    monkeypatch.setenv("MRAI_DIR", str(tmp_path / "env"))
+    assert cli.resolve_mrai_dir(None, repo) == tmp_path / "env"
+    assert cli.resolve_mrai_dir(tmp_path / "flag", repo) == tmp_path / "flag"  # --dir wins
+
+
+def test_default_state_dir_differs_per_workspace(tmp_path):
+    a = cli.resolve_mrai_dir(None, tmp_path / "x" / "api")
+    b = cli.resolve_mrai_dir(None, tmp_path / "y" / "api")
+    assert a != b  # same basename, different checkouts: no shared session
+    assert a == cli.resolve_mrai_dir(None, tmp_path / "x" / "api")  # stable
+
+
+def _workspace_user_error() -> cli.UserError:
+    return cli.UserError(
+        "The message history continues in workspace `local:/elsewhere`, but none of "
+        "the agent's workspace capabilities recognized it."
+    )
+
+
+def test_stale_workspace_history_is_dropped_and_rerun(cli_hermetic, monkeypatch):
+    monkeypatch.setattr(cli, "build_researcher", lambda *a, **k: (object(), None))
+    monkeypatch.setattr(cli, "build_writers", lambda *a, **k: [object()] * 3)
+    monkeypatch.setattr(cli, "_load_history", lambda *a, **k: ["stale"])
+    seen = []
+
+    async def _stub(researcher, writers, query, history, deps, settings):
+        seen.append(history)
+        if history:
+            raise _workspace_user_error()
+        raise cli.UnexpectedModelBehavior("stop here")  # fresh run reached; end the test
+
+    monkeypatch.setattr(cli, "_run_pipeline", _stub)
+    result = CliRunner().invoke(app, ["hello"])
+    assert seen == [["stale"], None]
+    assert "starting fresh" in result.output
+
+
+def test_workspace_user_error_without_history_propagates(cli_hermetic, monkeypatch):
+    monkeypatch.setattr(cli, "build_researcher", lambda *a, **k: (object(), None))
+    monkeypatch.setattr(cli, "build_writers", lambda *a, **k: [object()] * 3)
+    calls = {"n": 0}
+
+    async def _stub(researcher, writers, query, history, deps, settings):
+        calls["n"] += 1
+        raise _workspace_user_error()
+
+    monkeypatch.setattr(cli, "_run_pipeline", _stub)
+    result = CliRunner().invoke(app, ["hello"])
+    assert calls["n"] == 1  # nothing to drop: no silent retry loop
+    assert isinstance(result.exception, cli.UserError)

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import mrai.agent as agent_mod
 from mrai.agent import Answer, MemoryDeps
-from mrai.prompt import SYSTEM_PROMPT
+from mrai.prompt import RESEARCH_PROMPT, WRITER_PROMPT
 from mrai.settings import Settings
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import LocalWorkspace
@@ -18,7 +18,7 @@ def _offered_tools(tmp_path: Path) -> set[str]:
     agent = Agent(
         model=test_model,
         output_type=Answer,
-        instructions=SYSTEM_PROMPT,
+        instructions=RESEARCH_PROMPT,
         capabilities=[
             LocalWorkspace(tmp_path, read_only=True),
             FileSystem(read_only=True, content_hashes=False),
@@ -83,3 +83,24 @@ def test_writers_are_tool_less(cli_hermetic, monkeypatch):
     assert tm.last_model_request_parameters is not None
     names = {t.name for t in tm.last_model_request_parameters.function_tools}
     assert names == set()  # no tools, no web, no git — pure synthesis
+
+
+def test_prompts_carry_the_rules_and_no_stray_markers():
+    assert "3-5 candidate URLs in\n  ONE call" in RESEARCH_PROMPT
+    assert "at most 3 attempts" in RESEARCH_PROMPT
+    assert "Question: <the question" in RESEARCH_PROMPT
+    assert "exact `topic` slug" in WRITER_PROMPT
+    for prompt in (RESEARCH_PROMPT, WRITER_PROMPT):
+        assert ">>>" not in prompt
+
+
+def test_agents_get_tool_timeouts_and_the_retrying_client(cli_hermetic):
+    s = Settings(openrouter_api_key="k", tool_timeout=12, subagent_timeout=99)
+    plain, _ = agent_mod.build_researcher(cli_hermetic, "a/m", settings=s)
+    wide, _ = agent_mod.build_researcher(cli_hermetic, "a/m", subagents=True, settings=s)
+    assert plain._tool_timeout == 12
+    assert wide._tool_timeout == 99  # delegate_task shares the agent-wide budget
+    from mrai.retry import RetryTransport
+
+    client = plain.model._provider.client._client  # type: ignore[union-attr]
+    assert isinstance(client._transport, RetryTransport)

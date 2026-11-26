@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from time import monotonic
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 import typer
 from pydantic_ai import (
@@ -26,6 +26,7 @@ from pydantic_ai import (
     RunContext,
     ThinkingPartDelta,
     UnexpectedModelBehavior,
+    capture_run_messages,
 )
 from pydantic_ai.exceptions import UsageLimitExceeded, UserError
 from pydantic_ai.messages import (
@@ -35,6 +36,7 @@ from pydantic_ai.messages import (
     ModelResponse,
     TextPart,
     ToolCallPart,
+    ToolReturnPart,
     UserPromptPart,
 )
 from pydantic_ai.usage import RunUsage, UsageLimits
@@ -45,7 +47,7 @@ from rich.spinner import Spinner
 from rich.syntax import Syntax
 from rich.text import Text
 
-from . import render
+from . import render, retry
 from .agent import Answer, MemoryDeps, build_researcher, build_writers
 from .logbook import STATS_MARKER, Logbook, _atomic_write_text
 from .router import Route, resolve_route, select_final_answer
@@ -388,14 +390,19 @@ async def _run_with_watchdog(
     return run_task.result()
 
 
-# The three "angles" run as parallel agents, each producing ONE candidate
-# answer; Jev picks the winner afterwards. Distinct angles yield distinct,
-# comparable candidates.
-_ANGLES = (
+# One writer by default. Only a question judged complex (Jev, or --pro) fans out
+# to three angles for Jev to choose between; without Jev there is no chooser.
+_SINGLE_ANGLE = ("direct: answer the question directly, citing exact files/lines for each claim",)
+_PRO_ANGLES = (
     "code-provenance: trace where things come from and cite exact files/lines",
     "architecture: explain the design, its roles, and the tradeoffs involved",
     "pragmatic: give the shortest directly-actionable answer",
 )
+
+
+def _angles(route: Route) -> tuple[str, ...]:
+    fan_out = route.tier == "pro" and route.source in ("jev", "flag")
+    return _PRO_ANGLES if fan_out else _SINGLE_ANGLE
 
 
 def _merge_usage(*usages: RunUsage) -> RunUsage:
@@ -420,89 +427,99 @@ def _merge_usage(*usages: RunUsage) -> RunUsage:
     return result
 
 
-def _writer_prompt(query: str, angle: str) -> str:
-    """The writer's user message: the question plus its assigned angle."""
-    return f"Question: {query}\n\nAngle: {angle}\nWrite ONE final Answer."
+def _writer_prompt(query: str, angle: str, brief: str, partial: bool = False) -> str:
+    """The writer's whole input: no history, no transcript, just the brief."""
+    note = (
+        "The research hit its request limit before finishing: this evidence is partial, "
+        "so say what remains unverified.\n\n"
+        if partial
+        else ""
+    )
+    return (
+        f"Question: {query}\n\n{note}Researcher's brief (your only source):\n\n{brief}\n\n"
+        f"Angle: {angle}\nWrite ONE final Answer."
+    )
 
 
-async def _run_limited(
-    agent,
-    query: str,
-    history,
-    deps: MemoryDeps,
-    timeout: float,
-    usage: RunUsage,
-    *,
-    live: bool = True,
-    watchdog: bool = True,
-    limits: UsageLimits | None = None,
-    slow_overrides: dict[str, float] | None = None,
-):
-    """Run one agent with a UsageLimits guard; on UsageLimitExceeded retry once
-    with a doubled request_limit (transient 50-request exhaustion shouldn't end
-    a legitimate deep-thinking run), then re-raise."""
-    try:
-        return await _run_with_watchdog(
-            agent,
-            query,
-            history,
-            deps,
-            ToolRunView(timeout, slow_overrides),
-            usage,
-            live=live,
-            watchdog=watchdog,
-            limits=limits,
-        )
-    except UsageLimitExceeded:
-        console.print("[yellow]hit request budget; retrying with double limit[/yellow]")
-        base = limits.request_limit if limits and limits.request_limit else 100
-        doubled = UsageLimits(request_limit=2 * base)
-        return await _run_with_watchdog(
-            agent,
-            query,
-            history,
-            deps,
-            ToolRunView(timeout, slow_overrides),
-            usage,
-            live=live,
-            watchdog=watchdog,
-            limits=doubled,
-        )
+@dataclass
+class _PartialResearch:
+    """Stands in for the research result when the request limit cut it short."""
+
+    messages: list[ModelMessage]
+    replayed: int = 0  # leading messages that were the session history
+
+    def all_messages(self) -> list[ModelMessage]:
+        return self.messages
+
+    def new_messages(self) -> list[ModelMessage]:
+        return self.messages[self.replayed :]
+
+    @property
+    def output(self) -> str:
+        return _partial_evidence(self.messages)
+
+
+def _partial_evidence(
+    messages: Sequence[ModelMessage], per_part: int = 1500, total: int = 30_000
+) -> str:
+    """Tool calls, results and notes gathered so far, newest kept if over budget."""
+    lines: list[str] = []
+    for msg in messages:
+        for part in msg.parts:
+            if isinstance(part, ToolCallPart):
+                lines.append(f"→ {part.tool_name}({_fmt_args(part.args)})")
+            elif isinstance(part, ToolReturnPart):
+                text = str(part.content)
+                lines.append(text if len(text) <= per_part else text[:per_part] + " …")
+            elif isinstance(part, TextPart) and part.content.strip():
+                lines.append(part.content.strip())
+    out = "\n\n".join(lines)
+    return out if len(out) <= total else "… [earlier evidence truncated]\n" + out[-total:]
 
 
 async def _run_pipeline(
     researcher,
-    writers: Sequence,
+    writers: Sequence[tuple[Any, str]],
     query: str,
     history,
     deps: MemoryDeps,
     settings: Settings,
-) -> tuple[AgentRunResult, list[AgentRunResult[Answer] | BaseException], RunUsage]:
+) -> tuple[Any, list[AgentRunResult[Answer] | BaseException], RunUsage]:
     """Two-phase run.
 
-    Phase 1 — the one visible, tool-owning researcher streams a single thought
-    process and does every git/read/web step exactly once, returning an
-    evidence transcript. Phase 2 — three tool-less writers fan out in parallel,
-    each synthesizing ONE Answer from that transcript under its angle. Nothing
-    is re-collected. Returns (research, writer_results, merged_usage).
+    Phase 1: the researcher (the only agent with tools, and the only one given
+    the session history) streams its work and returns a self-contained brief.
+    Phase 2: one writer per angle turns that brief into an Answer; writers see
+    nothing else, so the transcript is never paid for twice. Nothing reruns: a
+    slow tool is a retry prompt to the model, a failed HTTP request is retried
+    by the transport, and hitting the request limit writes from what was found.
     """
-    timeout = settings.tool_timeout
     limits = UsageLimits(request_limit=settings.max_requests)
-    slow = {"delegate_task": settings.subagent_timeout}
+    # backstop only: pydantic-ai's tool_timeout normally ends a slow tool first
+    backstop = {"delegate_task": 2 * settings.subagent_timeout}
     r_usage = RunUsage()
+    partial = False
     _set_phase("researching")
-    research = await _run_limited(
-        researcher,
-        query,
-        history,
-        deps,
-        timeout,
-        r_usage,
-        live=True,
-        limits=limits,
-        slow_overrides=slow,
-    )
-    evidence = research.all_messages()  # the full tool workflow, verbatim
+    with capture_run_messages() as captured:
+        try:
+            research = await _run_with_watchdog(
+                researcher,
+                query,
+                history,
+                deps,
+                ToolRunView(2 * settings.tool_timeout, backstop),
+                r_usage,
+                live=True,
+                limits=limits,
+            )
+        except UsageLimitExceeded:
+            console.print(
+                f"[yellow]hit the {settings.max_requests}-request limit; "
+                "writing from the evidence gathered so far[/yellow]"
+            )
+            research = _PartialResearch(list(captured), replayed=len(history or []))
+            partial = True
+    brief = str(research.output)
 
     w_usages = [RunUsage() for _ in writers]
     done = 0
@@ -519,20 +536,19 @@ async def _run_pipeline(
     results = await asyncio.gather(
         *[
             _counted(
-                _run_limited(
+                _run_with_watchdog(
                     w,
-                    _writer_prompt(query, angle),
-                    list(evidence),
+                    _writer_prompt(query, angle, brief, partial),
+                    None,
                     deps,
-                    timeout,
+                    ToolRunView(settings.tool_timeout),
                     u,
                     live=False,
                     watchdog=False,
                     limits=limits,
-                    slow_overrides=slow,
                 )
             )
-            for w, angle, u in zip(writers, _ANGLES, w_usages, strict=False)
+            for (w, angle), u in zip(writers, w_usages, strict=True)
         ],
         return_exceptions=True,
     )
@@ -706,7 +722,10 @@ def main(
                 "web_fetch_budget": max_web_fetches,
             },
         )
-        writers = build_writers(Path.cwd(), route.model, _ANGLES, **common)
+        angles = _angles(route)
+        writers = list(
+            zip(build_writers(Path.cwd(), route.model, angles, **common), angles, strict=True)
+        )
     except Exception as exc:
         console.print(f"[red]model setup failed:[/red] {exc}")
         raise typer.Exit(1) from None
@@ -727,55 +746,19 @@ def main(
             history = []
             return asyncio.run(_run_pipeline(researcher, writers, query, None, deps, settings))
 
+    retry.on_retry = lambda reason, n, total, wait: console.print(
+        f"[yellow]upstream {reason}; retrying the request in {wait:.0f}s ({n}/{total})[/yellow]"
+    )
     with _run_status():
         try:
             research, results, usage = run_once()
         except ToolCallTimeout as exc:
-            console.print(
-                f"[yellow]tool call exceeded {settings.tool_timeout:.0f}s ({exc}); retrying run once[/yellow]"
-            )
-            try:
-                research, results, usage = run_once()
-            except (ToolCallTimeout, UnexpectedModelBehavior, AgentRunError) as exc2:
-                _log_failure(mrai_dir, query, f"retry failed: {_one_line(str(exc2))}", no_write)
-                console.print("[yellow]retry also failed; giving up[/yellow]")
-                raise typer.Exit(1) from None
+            _fail(mrai_dir, query, no_write, f"tool call hung past its time budget ({exc})")
         except UnexpectedModelBehavior as exc:
-            _log_failure(
-                mrai_dir,
-                query,
-                f"model gave up on a failing tool call: {_one_line(str(exc))}",
-                no_write,
-            )
-            console.print(
-                f"[yellow]model gave up on a failing tool call:[/yellow] {_one_line(str(exc))}"
-            )
-            raise typer.Exit(1) from None
+            _fail(mrai_dir, query, no_write, f"model gave up on a failing tool call: {exc}")
         except AgentRunError as exc:
-            if _is_retryable(exc):
-                console.print(
-                    f"[yellow]upstream HTTP 504/529/429 ({_one_line(str(exc))}); retrying run once[/yellow]"
-                )
-                try:
-                    research, results, usage = run_once()
-                except AgentRunError as exc2:
-                    _log_failure(
-                        mrai_dir,
-                        query,
-                        f"upstream error, retry failed: {_one_line(str(exc2))}",
-                        no_write,
-                    )
-                    console.print(f"[red]retry failed:[/red] {_one_line(str(exc2))}")
-                    raise typer.Exit(1) from None
-            else:
-                _log_failure(
-                    mrai_dir,
-                    query,
-                    f"run failed: {_one_line(str(exc))}",
-                    no_write,
-                )
-                console.print(f"[red]run failed:[/red] {_one_line(str(exc))}")
-                raise typer.Exit(1) from None
+            retried = " after retrying the request" if _is_retryable(exc) else ""
+            _fail(mrai_dir, query, no_write, f"run failed{retried}: {exc}")
 
         ok = [r for r in results if not isinstance(r, BaseException)]
         for i, r in enumerate(results, 1):
@@ -812,8 +795,13 @@ def main(
                 f"  [bold]{i + 1} · {c.title}[/bold] {scores[i]:.2f}  [dim]{' '.join(c.markdown.split())[:96]}[/dim]{mark}"
             )
     ans = candidates[idx]
+    cost_note = ""
+    if usage.cost is None:  # pydantic-ai has no price for the model: use what OpenRouter billed
+        usage.cost = _reported_cost([research, *ok])
+        if usage.cost is not None and count_tool_calls(research)["delegate_task"]:
+            cost_note = "excl. explorer subagent"
     if not no_write:
-        _save_history(session_path, research.all_messages(), settings.max_history)
+        _append_turn(session_path, history, query, ans.markdown, settings.max_history)
     console.print()
     console.print(_Markdown(ans.markdown))
     console.print()
@@ -830,7 +818,20 @@ def main(
         memory_file,
         usage,
         pick_cost,
+        cost_note,
     )
+
+
+def _reported_cost(runs: Sequence[Any]) -> Decimal | None:
+    """Sum the cost the provider reported on this run's own responses; None if none did."""
+    costs = [
+        Decimal(str(cost))
+        for run in runs
+        for msg in run.new_messages()
+        if isinstance(msg, ModelResponse)
+        and (cost := (msg.provider_details or {}).get("cost")) is not None
+    ]
+    return sum(costs, Decimal(0)) if costs else None
 
 
 def _trim_history(messages: Sequence[ModelMessage], max_history: int) -> list[ModelMessage]:
@@ -872,6 +873,18 @@ def _load_history(path: Path, max_history: int) -> list[ModelMessage]:
     except Exception:
         return []
     return _trim_history(history, max_history)
+
+
+def _append_turn(
+    path: Path, history: Sequence[ModelMessage], query: str, answer: str, max_history: int
+) -> None:
+    """Save the question and the final answer: the researcher's brief and tool
+    output are not replayed into later runs."""
+    turn = [
+        ModelRequest(parts=[UserPromptPart(content=query)]),
+        ModelResponse(parts=[TextPart(content=answer)]),
+    ]
+    _save_history(path, [*history, *turn], max_history)
 
 
 def _save_history(path: Path, messages: Sequence[ModelMessage], max_history: int) -> None:
@@ -917,11 +930,20 @@ def _print_footer(
     memory_file: Path,
     usage: RunUsage,
     pick_cost: float | None,
+    cost_note: str = "",
 ) -> None:
-    stats = _run_stats(result, route, webfetch, usage, pick_cost)
+    stats = _run_stats(result, route, webfetch, usage, pick_cost, cost_note)
+    skip = not no_write and _is_trivial(query, stats)
     logged = f"{markdown.rstrip()}\n\n{_stats_markdown(stats)}"
-    _log_topic(mrai_dir, topic, title, logged, query, no_write, memory_file)
+    _log_topic(mrai_dir, topic, title, logged, query, no_write or skip, memory_file)
+    if skip:
+        console.print("[dim]not logged: a short question that needed no repo lookups[/dim]")
     _print_stats(stats)
+
+
+def _is_trivial(query: str, stats: RunStats) -> bool:
+    """A greeting or one-liner the researcher answered without touching the repo."""
+    return not stats.tools and len(query.split()) <= 3
 
 
 def _log_topic(
@@ -989,6 +1011,12 @@ def _log_failure(
     console.print(f"[dim]logged failure: {path}[/dim]")
 
 
+def _fail(mrai_dir: Path, query: str, no_write: bool, reason: str) -> NoReturn:
+    _log_failure(mrai_dir, query, _one_line(reason), no_write)
+    console.print(f"[red]{_one_line(reason)}[/red]")
+    raise typer.Exit(1)
+
+
 def _is_retryable(exc: BaseException) -> bool:
     """OpenRouter 504 upstream-idle-timeout / 529 overloaded / 429 rate-limit."""
     text = str(exc)
@@ -1003,6 +1031,7 @@ def _is_retryable(exc: BaseException) -> bool:
 @dataclass
 class RunStats:
     cost: Decimal | float | None
+    cost_note: str = ""
     jev: float = 0.0
     screen: float = 0.0
     requests: int | None = None
@@ -1011,10 +1040,16 @@ class RunStats:
 
 
 def _run_stats(
-    result, route: Route, webfetch: WebFetchTool | None, usage: RunUsage, pick_cost: float | None
+    result,
+    route: Route,
+    webfetch: WebFetchTool | None,
+    usage: RunUsage,
+    pick_cost: float | None,
+    cost_note: str = "",
 ) -> RunStats:
     return RunStats(
         cost=usage.cost,
+        cost_note=cost_note,
         jev=(route.jev_cost or 0.0) + (pick_cost or 0.0),
         screen=(webfetch.screen_cost or 0.0) if webfetch is not None else 0.0,
         requests=getattr(usage, "requests", None),
@@ -1024,7 +1059,8 @@ def _run_stats(
 
 
 def _cost_parts(stats: RunStats) -> list[tuple[str, str]]:
-    parts = [("Cost", "unavailable" if stats.cost is None else f"${stats.cost:.6f}")]
+    cost = "unavailable" if stats.cost is None else f"${stats.cost:.6f}"
+    parts = [("Cost", f"{cost} ({stats.cost_note})" if stats.cost_note else cost)]
     if stats.jev:
         parts.append(("Jev", f"${stats.jev:.6f}"))
     if stats.screen:

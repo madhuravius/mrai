@@ -9,19 +9,19 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.models.openrouter import OpenRouterModel
+from pydantic_ai.models.openrouter import OpenRouterModel, OpenRouterModelSettings
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai_harness import FileSystem, SubAgent, SubAgents
 
 from .prompt import EXPLORER_PROMPT, RESEARCH_PROMPT, WRITER_PROMPT
+from .retry import model_client
 from .settings import DEFAULT_DENIED_PATTERNS, Settings
 from .tools import GitTools
 from .webfetch import WebFetchTool
 
 __all__ = [
     "Answer",
-    "AnswerCandidates",
     "MemoryDeps",
     "build_researcher",
     "build_writers",
@@ -50,12 +50,6 @@ class Answer(BaseModel):
     markdown: str = Field(description="the terse, developer-oriented markdown answer")
 
 
-class AnswerCandidates(BaseModel):
-    """Two or three complete candidate answers; Jev picks the winner after the run."""
-
-    candidates: list[Answer] = Field(min_length=2, max_length=3)
-
-
 def _read_only(root: Path, extra: tuple[str, ...] = ()) -> list:
     """cwd-rooted, zero-write capability set (path traversal/symlink escapes refused)."""
     return [
@@ -70,9 +64,17 @@ def _read_only(root: Path, extra: tuple[str, ...] = ()) -> list:
 
 
 def _model(s: Settings, key: str | None, name: str):
+    client = model_client()  # retries a failed request, not the whole run
     if s.base_url:  # any OpenAI-compatible gateway (bifrost, …)
-        return OpenAIChatModel(name, provider=OpenAIProvider(api_key=key, base_url=s.base_url))
-    return OpenRouterModel(name, provider=OpenRouterProvider(api_key=key))
+        return OpenAIChatModel(
+            name, provider=OpenAIProvider(api_key=key, base_url=s.base_url, http_client=client)
+        )
+    return OpenRouterModel(
+        name,
+        provider=OpenRouterProvider(api_key=key, http_client=client),
+        # OpenRouter then reports each request's actual cost (provider_details["cost"])
+        settings=OpenRouterModelSettings(openrouter_usage={"include": True}),
+    )
 
 
 def _make(
@@ -111,6 +113,7 @@ def _make(
                             instructions=EXPLORER_PROMPT,
                             capabilities=_read_only(root, deny),
                             retries=3,
+                            tool_timeout=s.tool_timeout,
                         ),
                         name="explorer",
                         description="Fast read-only codebase explorer: search, grep, read.",
@@ -126,6 +129,8 @@ def _make(
     if tools_on:
         git_tools = GitTools(root, denied_patterns=[*DEFAULT_DENIED_PATTERNS, *deny])
         tools += [git_tools.git_diff, git_tools.git_status, git_tools.git_compare]
+    # A slow tool becomes a retry prompt to the model rather than a cancelled run;
+    # delegate_task shares the agent-wide budget, so subagents get theirs.
     agent = Agent(
         model=_model(s, key, model_name),
         output_type=output_type,
@@ -134,6 +139,7 @@ def _make(
         tools=tools,
         deps_type=MemoryDeps,
         retries=3,
+        tool_timeout=s.subagent_timeout if subagents else s.tool_timeout,
     )
     if memory:
 
@@ -195,7 +201,7 @@ def build_writers(
             root,
             model_name,
             output_type=Answer,
-            instructions=WRITER_PROMPT + f"\nAngle: {angle}",
+            instructions=WRITER_PROMPT,
             tools_on=False,
             web_fetch=False,
             read_only=False,  # no filesystem view at all: synthesize, never read

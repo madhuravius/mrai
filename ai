@@ -18,7 +18,7 @@ hist_file="$mrai_home/history/$key"
 
 remember() {
     local line tmp
-    line=$(printf '%s' "$1" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+    line=$(printf '%s' "${1//$'\n'/↩}" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
     [[ -z "$line" ]] && return 0
     (
         umask 077
@@ -30,24 +30,12 @@ remember() {
     )
 }
 
-compose_long() {
-    if ! command -v gum &>/dev/null; then
-        echo "gum is required for multi-line prompts — https://github.com/charmbracelet/gum#installation" >&2
-        exit 1
-    fi
-    gum write \
-        --header "What do you need to know about this codebase? (Enter sends · Ctrl-J new line · Esc cancels)" \
-        --placeholder "e.g. Why does CI fail on ARM? How is auth wired?" \
-        --height 6
-}
-
-# Erase the terminal rows the "> <text>" input line wrapped onto, so it can be redrawn.
-erase_input() {
-    [[ -t 2 ]] || return 0
+# Terminal rows a "> <text>" input line took, so they can be erased and redrawn.
+input_rows() {
     local cols
     cols=$(stty size </dev/tty 2>/dev/null | cut -d' ' -f2)
     [[ "$cols" =~ ^[1-9][0-9]*$ ]] || cols=80
-    printf '\e[%dA\e[J' $(((2 + ${#1} + cols - 1) / cols)) >&2
+    echo $(((2 + ${#1} + cols - 1) / cols))
 }
 
 # Redraw the prompt in green: it's accepted, and the container is starting.
@@ -58,22 +46,29 @@ show_submitted() {
 }
 
 compose() {
-    local line text
+    local line text= rows=0 rc send prompt="> " key=$'\037'
     unset HISTFILE
     history -c
     [[ -f "$hist_file" ]] && history -r "$hist_file"
-    if command -v gum &>/dev/null; then
-        gum style --foreground 240 "What do you need to know about this codebase?  (↑/↓ history · Ctrl-R search · empty Enter: multi-line)" >&2
-    else
-        echo "What do you need to know about this codebase?  (↑/↓ history · Ctrl-R search)" >&2
-    fi
-    IFS= read -e -r -p "> " line || exit 0
-    erase_input "$line"
-    if [[ -z "${line//[[:space:]]/}" ]] && command -v gum &>/dev/null; then
-        text=$(compose_long)
-    else
-        text=$line
-    fi
+    local hint="What do you need to know about this codebase?  (Enter twice or Ctrl-J: send · ↑/↓ history · Ctrl-R search)"
+    if command -v gum &>/dev/null; then gum style --foreground 240 "$hint" >&2; else echo "$hint" >&2; fi
+    # `bind` is ignored outside interactive shells, so keys go in via INPUTRC. Ctrl-J,
+    # Alt-Enter and CSI-u Shift-Enter insert a literal \037 and accept: "send now".
+    rc=$(mktemp)
+    printf '%s\n' '$include ~/.inputrc' 'set input-meta on' 'set output-meta on' 'set convert-meta off' \
+        '"\C-j": "\C-v\037\C-m"' '"\e\r": "\C-v\037\C-m"' '"\e[13;2u": "\C-v\037\C-m"' >"$rc"
+    while INPUTRC=$rc IFS= read -e -r -p "$prompt" line; do
+        send=
+        [[ "$line" == *"$key"* ]] && send=1 line=${line//$key/}
+        rows=$((rows + $(input_rows "$line")))
+        [[ -z "$line" && -z "$send" ]] && break
+        text+=${text:+$'\n'}$line
+        prompt="  "
+        [[ -n "$send" ]] && break
+    done
+    rm -f "$rc"
+    [[ -t 2 && $rows -gt 0 ]] && printf '\e[%dA\e[J' "$rows" >&2
+    text=${text//↩/$'\n'}
     show_submitted "$text"
     printf '%s' "$text"
 }

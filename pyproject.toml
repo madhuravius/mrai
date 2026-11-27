@@ -3,7 +3,7 @@ name = "mrai"
 version = "0.1.0"
 description = "Read-only dev agent that logs terse answers to .mrai/*.md"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.15"
 authors = [{ name = "Madhusudan Ravi", email = "madhuravius@protonmail.com" }]
 classifiers = [
     "Development Status :: 3 - Alpha",
